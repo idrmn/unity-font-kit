@@ -1,0 +1,19 @@
+# freetype-sys 0.23.0 with FreeType 2.13.2, always built from source.
+# Changes for ufk: FreeType release sources instead of a git snapshot, no libpng, no pkg-config, no system zlib.
+[package]
+edition = "2018"
+name = "freetype-sys"
+version = "0.23.0"
+authors = ["Coeuvre <coeuvre@gmail.com>"]
+build = "build.rs"
+links = "freetype"
+description = "Low level binding for FreeType font library"
+license = "MIT AND FTL"
+repository = "https://github.com/PistonDevelopers/freetype-sys.git"
+
+[lib]
+name = "freetype_sys"
+path = "src/lib.rs"
+
+[build-dependencies]
+cc = "1"
