@@ -1,0 +1,130 @@
+use std::fs::File;
+use std::io::{BufWriter, Read, Seek, Write};
+use std::path::Path;
+
+use crate::files::bundlefile::{self, BundleFileHeader, CompressionType};
+use crate::files::unityfile::FileEntry;
+use crate::unity_version::UnityVersion;
+
+/// Builder for ergonomically creating a bundlefile.
+///
+/// # Example
+/// ```rust,no_run
+/// use std::fs::File;
+/// use std::io::{BufReader, BufWriter};
+/// use std::path::Path;
+///
+/// use anyhow::Result;
+/// use rabex::files::bundlefile::builder::BundleFileBuilder;
+/// use rabex::files::bundlefile::CompressionType;
+///
+/// fn main() -> Result<()> {
+///     let mut builder = BundleFileBuilder::unityfs(7, &"2020.2.2f1".parse().unwrap());
+///
+///     builder.add_file("File1", BufReader::new(File::open("file1")?))?;
+///     builder.add_file("File1.sharedAssets", BufReader::new(File::open("file1-assets")?))?;
+///
+///     let mut out = BufWriter::new(File::open("out.unity3d")?);
+///     builder.write(&mut out, CompressionType::None)?;
+///
+///     Ok(())
+/// }
+/// ```
+pub struct BundleFileBuilder {
+    version: u32,
+    unity_version: UnityVersion,
+    header_compression: CompressionType,
+
+    uncompressed: Vec<u8>,
+    dir_infos: Vec<FileEntry>,
+}
+impl BundleFileBuilder {
+    /// Currently supported are versions 7 and 8.
+    pub fn unityfs(version: u32, unity_version: &UnityVersion) -> BundleFileBuilder {
+        BundleFileBuilder {
+            version,
+            unity_version: unity_version.clone(),
+            #[cfg(feature = "compression-lz4hc")]
+            header_compression: CompressionType::Lz4hc,
+            #[cfg(all(not(feature = "compression-lz4hc"), feature = "compression-lz4"))]
+            header_compression: CompressionType::Lz4,
+            #[cfg(all(not(feature = "compression-lz4hc"), not(feature = "compression-lz4")))]
+            header_compression: CompressionType::None,
+            uncompressed: Vec::new(),
+            dir_infos: Vec::new(),
+        }
+    }
+
+    pub fn set_header_compression(&mut self, compression: CompressionType) {
+        self.header_compression = compression;
+    }
+
+    /// Add a file to the bundle, with flags marking it as a serialized file
+    pub fn add_file(&mut self, path: &str, file: impl Read) -> Result<(), std::io::Error> {
+        self.add_file_with_flags(path, file, FileEntry::FLAG_SERIALIZEDFILE)
+    }
+
+    pub fn add_file_with_flags(
+        &mut self,
+        path: &str,
+        mut file: impl Read,
+        flags: u32,
+    ) -> Result<(), std::io::Error> {
+        let offset = self.uncompressed.len();
+        let len = std::io::copy(&mut file, &mut self.uncompressed)?;
+        self.dir_infos.push(FileEntry {
+            offset: offset as i64,
+            size: len as i64,
+            flags,
+            path: path.to_owned(),
+        });
+
+        Ok(())
+    }
+
+    pub fn write_to_file(
+        self,
+        path: impl AsRef<Path>,
+        compression: CompressionType,
+    ) -> Result<(), std::io::Error> {
+        let writer = BufWriter::new(File::create(path.as_ref())?);
+        self.write(writer, compression)
+    }
+
+    pub fn write(
+        self,
+        mut writer: impl Write + Seek,
+        compression: CompressionType,
+    ) -> Result<(), std::io::Error> {
+        let header = BundleFileHeader {
+            signature: bundlefile::BundleSignature::UnityFS,
+            version: self.version,
+            unity_version: "5.x.x".to_owned(),
+            unity_revision: Some(self.unity_version),
+            size: 0, // unused
+        };
+
+        if self.version < 7 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Bundle File version < 7 not supported".to_string(),
+            ));
+        }
+        if self.version > 8 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Bundle File version > 8 not supported".to_string(),
+            ));
+        }
+
+        header.write(&mut writer)?;
+        bundlefile::write_fs(
+            &header,
+            writer,
+            self.header_compression,
+            compression,
+            &self.dir_infos,
+            &self.uncompressed,
+        )
+    }
+}
