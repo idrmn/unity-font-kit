@@ -50,7 +50,7 @@ pub struct Ui {
     pub error: State<Option<String>>,
     pub done: State<Option<String>>,
     pub dialog: State<Dialog>,
-    pub options: State<Option<Vec<FontOption>>>,
+    pub options: State<Option<Result<Vec<FontOption>, String>>>,
     pub picked: State<Pick>,
     /// Fonts ticked in the dialog that saves font files.
     pub saved_fonts: State<Vec<FontKey>>,

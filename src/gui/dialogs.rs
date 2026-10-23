@@ -240,8 +240,12 @@ pub fn open_picker(ui: Ui, key: FontKey) {
     spawn(async move {
         let wanted = current.clone();
         let (listed, matching) = blocking::unblock(move || {
-            let listed = session::list_options(&game, &letters).unwrap_or_default();
-            let matching = wanted.and_then(|path| find_same_file(&listed, &path));
+            let listed = session::list_options(&game, &letters);
+            let matching = listed
+                .as_ref()
+                .ok()
+                .zip(wanted)
+                .and_then(|(listed, path)| find_same_file(listed, &path));
             (listed, matching)
         })
         .await;
@@ -252,15 +256,19 @@ pub fn open_picker(ui: Ui, key: FontKey) {
         if let Some(same) = matching.filter(|_| *picked.peek() == start) {
             picked.set(Pick::File(same));
         }
-        let added: Vec<FontOption> = options
-            .peek()
-            .iter()
-            .flatten()
-            .filter(|option| !listed.iter().any(|known| known.path == option.path))
-            .cloned()
-            .collect();
-        let listed = [listed, added].concat();
-        options.set(Some(listed));
+        let listed = match listed {
+            Ok(listed) => listed,
+            Err(failure) => return options.set(Some(Err(format!("{failure:#}")))),
+        };
+        let added: Vec<FontOption> = match &*options.peek() {
+            Some(Ok(shown)) => shown
+                .iter()
+                .filter(|option| !listed.iter().any(|known| known.path == option.path))
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        options.set(Some(Ok([listed, added].concat())));
     });
 }
 
@@ -275,7 +283,7 @@ fn find_same_file(options: &[FontOption], path: &Path) -> Option<PathBuf> {
 
 fn picker_body(ui: Ui) -> Rect {
     let loaded = ui.options.read().clone();
-    let options = loaded.clone().unwrap_or_default();
+    let options = loaded.clone().and_then(Result::ok).unwrap_or_default();
     let picked = ui.picked.read().clone();
     let groups = [(Origin::Game, "In this game"), (Origin::Added, "Added")];
     let mut list = rect()
@@ -302,12 +310,13 @@ fn picker_body(ui: Ui) -> Rect {
                     .map(|option| option_row(ui, option, picked.file()).into()),
             );
     }
-    let hint = match &loaded {
-        None => Some("Reading the fonts…"),
-        Some(listed) if listed.is_empty() => {
-            Some("No font in this game has all your letters. Add a font file that has them.")
-        }
-        Some(_) => None,
+    let hint = match loaded {
+        None => Some("Reading the fonts…".to_string()),
+        Some(Err(failure)) => Some(failure),
+        Some(Ok(listed)) if listed.is_empty() => Some(
+            "No font in this game has all your letters. Add a font file that has them.".to_string(),
+        ),
+        Some(Ok(_)) => None,
     };
     rect().width(Size::fill()).spacing(10.).child(
         rect()
@@ -399,7 +408,11 @@ fn add_font(ui: Ui) {
         match blocking::unblock(move || session::add_font_file(&path, &letters)).await {
             Ok(added) => {
                 picked.set(Pick::File(added.path.clone()));
-                options.write().get_or_insert_with(Vec::new).push(added);
+                let mut shown = options.write();
+                match shown.as_mut() {
+                    Some(Ok(listed)) => listed.push(added),
+                    _ => *shown = Some(Ok(vec![added])),
+                }
             }
             Err(failure) => error.set(Some(format!("{failure:#}"))),
         }
@@ -499,6 +512,7 @@ fn folders_body(ui: Ui) -> Rect {
         .collect();
     let mut library = ui.library;
     let mut found_games = ui.found_games;
+    let mut error = ui.error;
     rect()
         .width(Size::fill())
         .spacing(10.)
@@ -521,7 +535,9 @@ fn folders_body(ui: Ui) -> Rect {
                         .on_press(move |_| {
                             let mut next = library.read().clone();
                             next.folders.retain(|kept| kept != &gone);
-                            let _ = session::save_library(&next);
+                            if let Err(failure) = session::save_library(&next) {
+                                error.set(Some(format!("{failure:#}")));
+                            }
                             found_games.set(session::find_games(&next.folders));
                             library.set(next);
                         })

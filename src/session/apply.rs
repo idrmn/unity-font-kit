@@ -151,7 +151,7 @@ pub fn remove_game_data(record: &GameRecord) -> Result<()> {
         }
         Err(error) if backed_up => {
             return Err(error).context(
-                "The game folder is not found, so its original files cannot go back.                  Connect the drive with the game and try again",
+                "The game folder is not found, so its original files cannot go back. Connect the drive with the game and try again",
             );
         }
         Err(_) => {}

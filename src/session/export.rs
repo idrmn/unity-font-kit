@@ -8,12 +8,12 @@ use crate::work::export;
 
 use super::{FontStatus, GameState, GameView, state};
 
-fn default_readme(view: &GameView) -> String {
+fn default_readme(view: &GameView) -> Result<String> {
     let folder = folder::find_data_dir(&view.record.folder)
         .ok()
         .and_then(|dir| Some(dir.file_name()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| format!("{}_Data", view.record.name));
-    export::default_readme(&view.record.name, &folder).unwrap_or_default()
+    export::default_readme(&view.record.name, &folder)
 }
 
 /// Only what is in the game now, so the patch holds fonts that were seen there.
@@ -37,5 +37,6 @@ pub fn export(view: &GameView, target: &Path, progress: Report) -> Result<PathBu
         total: 1,
         step: "Making the zip".to_string(),
     });
-    export::export_to(&work, &game.data_dir, &default_readme(view), target)
+    let readme = default_readme(view)?;
+    export::export_to(&work, &game.data_dir, &readme, target)
 }

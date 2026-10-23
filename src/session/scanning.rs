@@ -118,9 +118,10 @@ pub(crate) fn has_scan_cache(work: &Project) -> bool {
 }
 
 pub(crate) fn forget_scan(work: &Project) -> Result<()> {
-    match std::fs::remove_file(work.work.join(SCAN_FILE)) {
+    let path = work.work.join(SCAN_FILE);
+    match std::fs::remove_file(&path) {
         Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", work.work.display()))
+            Err(error).with_context(|| format!("Cannot delete {}", path.display()))
         }
         _ => Ok(()),
     }
