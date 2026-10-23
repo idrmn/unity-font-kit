@@ -1,19 +1,35 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 
 use crate::downloads;
-use crate::game::folder::{self, Game};
+use crate::game::folder::{self, Backend, Game};
 
 use super::state;
-use super::{GameRecord, Library};
 
 const LIBRARY_FILE: &str = "games.json";
 const DATA_SUFFIX: &str = "_Data";
 // Long enough to tell game folders apart, short enough for Windows' 260-character paths.
 const ID_HASH: usize = 8;
 const ID_NAME: usize = 40;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GameRecord {
+    pub id: String,
+    /// The folder that holds the game's data folder.
+    pub folder: PathBuf,
+    pub name: String,
+    pub unity_version: String,
+    pub backend: Backend,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Library {
+    pub games: Vec<GameRecord>,
+    pub folders: Vec<PathBuf>,
+}
 
 pub fn load_library() -> Result<Library> {
     read_library(&downloads::find_home()?)
@@ -46,6 +62,7 @@ pub fn read_game(path: &Path) -> Result<GameRecord> {
     Ok(make_record(&folder::locate(path)?))
 }
 
+#[must_use]
 pub fn add_record(library: &Library, record: GameRecord) -> (Library, GameRecord) {
     if let Some(known) = library.games.iter().find(|game| game.id == record.id) {
         return (library.clone(), known.clone());
@@ -119,6 +136,7 @@ fn is_game_folder(dir: &Path) -> bool {
     !folder::is_data_dir(dir) && folder::find_data_dir(dir).is_ok()
 }
 
+#[must_use]
 pub(crate) fn make_record(game: &Game) -> GameRecord {
     let folder = game
         .data_dir
@@ -145,19 +163,16 @@ fn name_game(data_dir: &Path, folder: &Path) -> String {
     data.strip_suffix(DATA_SUFFIX).unwrap_or(&data).to_string()
 }
 
+#[must_use]
 pub(crate) fn make_id(name: &str, folder: &Path) -> String {
-    let slug: String = name
+    use sha2::Digest;
+    let dashed: String = name
         .to_lowercase()
         .chars()
         .map(|ch| if ch.is_alphanumeric() { ch } else { '-' })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .take(ID_NAME)
         .collect();
+    let words: Vec<&str> = dashed.split('-').filter(|part| !part.is_empty()).collect();
+    let slug: String = words.join("-").chars().take(ID_NAME).collect();
     let digest: String = Sha256::digest(folder.to_string_lossy().as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

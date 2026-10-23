@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use freya::prelude::Size2D;
 use freya_testing::prelude::TestingRunner;
+use unity_font_kit::session::ScanDepth;
 use unity_font_kit::{progress, session};
 
 fn settle(runner: &mut TestingRunner, millis: u64) {
@@ -34,7 +35,7 @@ fn prepare(game: &Path, font: &Path) -> Result<()> {
     let (library, record) = session::add_game(&session::load_library()?, game)?;
     session::save_library(&library)?;
     let letters = session::letters_from_preset("uk")?;
-    let mut view = session::scan(&record, false, &letters, &progress::silent)?;
+    let mut view = session::scan(&record, ScanDepth::Fast, &letters, &progress::silent)?;
     let keys: Vec<session::FontKey> = view
         .plan
         .iter()

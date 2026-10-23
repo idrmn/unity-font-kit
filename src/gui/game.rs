@@ -1,20 +1,25 @@
+use std::cmp::Reverse;
+use std::collections::BTreeSet;
+use std::path::Path;
+
 use freya::prelude::{
-    Alignment, AttachedPosition, Button, ChildrenExt, ContainerExt, ContainerSizeExt,
+    Alignment, AttachedPosition, Button, ChildrenExt, Color, ContainerExt, ContainerSizeExt,
     ContainerWithContentExt, Content, Element, Event, EventHandlersExt, FontWeight, Input,
     IntoElement, Layer, LayerExt, MenuItem, Overflow, PressEventData, ProgressBar, Rect,
     ScrollView, Select, Size, StyleExt, TextStyleExt, Tooltip, TooltipContainer, WritableUtils,
     rect,
 };
 
-use std::collections::BTreeSet;
-
-use super::filters::{self, Sort, SortKey};
+use super::app::BLOCKER_LAYER;
 use super::icons;
+use super::sort::{self, Group, Sort, SortKey};
 use super::theme::{
-    self, ACCENT, CAPTION, ERROR, ERROR_TINT, OK, PANEL_RADIUS, SECONDARY, TERTIARY, WARN, WINDOW,
+    self, ACCENT, CAPTION, ERROR, ERROR_TINT, OK, PANEL_RADIUS, SECONDARY, Side, TERTIARY, WARN,
+    WINDOW,
 };
-use super::{Dialog, Ui, tasks};
-use crate::session::{self, FontKey, FontStatus, GameState, GameView};
+use super::ui::{Dialog, Ui};
+use super::{dialogs, sidebar, tasks};
+use crate::session::{self, FontKey, FontStatus, GameState, GameView, ScanDepth};
 use crate::work::plan::Entry;
 
 pub fn view(ui: Ui) -> impl IntoElement {
@@ -43,7 +48,7 @@ fn empty(ui: Ui) -> Rect {
         ))
         .child(
             theme::primary_with(icons::ADD_GAME, "Add game…")
-                .on_press(move |_| super::sidebar::add_game(ui)),
+                .on_press(move |_| sidebar::add_game(ui)),
         )
         .maybe_child(failure.map(|message| theme::text(message, theme::BODY, ERROR)))
 }
@@ -66,11 +71,13 @@ fn scan_buttons(ui: Ui) -> Rect {
         .spacing(8.)
         .child(theme::dimmed(
             idle,
-            theme::secondary_with(icons::FAST_SCAN, "Fast scan").on_press(move |_| scan(ui, false)),
+            theme::secondary_with(icons::FAST_SCAN, "Fast scan")
+                .on_press(move |_| scan(ui, ScanDepth::Fast)),
         ))
         .child(theme::dimmed(
             idle,
-            theme::secondary_with(icons::DEEP_SCAN, "Deep scan").on_press(move |_| scan(ui, true)),
+            theme::secondary_with(icons::DEEP_SCAN, "Deep scan")
+                .on_press(move |_| scan(ui, ScanDepth::Deep)),
         ))
 }
 
@@ -138,32 +145,32 @@ fn letters_bar(ui: Ui) -> Rect {
         .child(scan_buttons(ui))
 }
 
-pub fn scan(ui: Ui, full: bool) {
+pub fn scan(ui: Ui, depth: ScanDepth) {
     let Some(record) = ui.view.read().as_ref().map(|game| game.record.clone()) else {
         return;
     };
     let letters = ui.current_letters();
     let mut view = ui.view;
-    let label = if full {
-        "Reading every game file"
-    } else {
-        "Looking for fonts"
+    let label = match depth {
+        ScanDepth::Deep => "Reading every game file",
+        ScanDepth::Fast => "Looking for fonts",
     };
     tasks::run_stoppable(
         ui,
         label,
-        move |progress| session::scan(&record, full, &letters, progress),
+        move |progress| session::scan(&record, depth, &letters, progress),
         move |scanned| view.set(Some(scanned)),
     );
 }
 
+#[must_use]
 pub fn visible_entries(game: &GameView) -> Vec<Entry> {
     let mut shown: Vec<Entry> = game
         .plan
         .iter()
         .flat_map(|plan| plan.fonts.clone())
         .collect();
-    shown.sort_by_key(|entry| std::cmp::Reverse(entry.texts));
+    shown.sort_by_key(|entry| Reverse(entry.texts));
     shown
 }
 
@@ -208,8 +215,8 @@ fn clear_choices(ui: Ui) {
 
 fn fonts(ui: Ui, game: &GameView) -> Rect {
     let search = ui.search.read().clone();
-    let sort = ui.sort.read().in_effect(filters::has_counts(game));
-    let shown = filters::select_entries(game, &search, sort);
+    let sort = ui.sort.read().in_effect(sort::has_counts(game));
+    let shown = sort::select_entries(game, &search, sort);
     let nothing = shown.is_empty();
     let columns = list_columns(game);
     let toolbar = rect()
@@ -256,12 +263,11 @@ fn fonts(ui: Ui, game: &GameView) -> Rect {
                     .child(
                         ScrollView::new().height(Size::flex(1.)).child(
                             rect().width(Size::fill()).children(
-                                filters::group_entries(shown, sort)
+                                sort::group_entries(shown, sort)
                                     .into_iter()
                                     .enumerate()
-                                    .map(|(index, (heading, entries))| {
-                                        group(ui, game, &columns, sort, (index, heading), &entries)
-                                            .into()
+                                    .map(|(index, section)| {
+                                        group(ui, game, &columns, sort, index, &section).into()
                                     }),
                             ),
                         ),
@@ -392,7 +398,7 @@ impl Column {
 
 /// Without counted texts the column would say nothing.
 fn list_columns(game: &GameView) -> Vec<Column> {
-    let counted = filters::has_counts(game);
+    let counted = sort::has_counts(game);
     [
         Column::Font,
         Column::UsedIn,
@@ -409,10 +415,10 @@ fn group(
     game: &GameView,
     columns: &[Column],
     sort: Sort,
-    (index, heading): (usize, String),
-    entries: &[Entry],
+    index: usize,
+    section: &Group,
 ) -> Rect {
-    let titled = !heading.is_empty();
+    let titled = !section.heading.is_empty();
     rect()
         .width(Size::fill())
         .maybe_child((index > 0).then(theme::divider))
@@ -421,9 +427,9 @@ fn group(
                 .width(Size::fill())
                 .padding((8., 20.))
                 .background(theme::CONTENT)
-                .child(theme::caption(heading))
+                .child(theme::caption(section.heading.clone()))
         }))
-        .children(entries.iter().enumerate().map(|(position, entry)| {
+        .children(section.entries.iter().enumerate().map(|(position, entry)| {
             rect()
                 .width(Size::fill())
                 .maybe_child((position > 0 || titled).then(theme::divider))
@@ -475,7 +481,7 @@ fn row(ui: Ui, game: &GameView, entry: &Entry, columns: &[Column], show_file: bo
                             event.stop_propagation();
                             // A scan rewrites the plan when it ends, which would drop a choice made meanwhile.
                             if !tasks::reject_busy(ui) {
-                                super::dialogs::open_picker(ui, pick_key.clone());
+                                dialogs::open_picker(ui, pick_key.clone());
                             }
                         })
                         .into()
@@ -552,7 +558,7 @@ fn replacement_field(entry: &Entry, replacement: Option<&session::Replacement>) 
         .child(theme::line(label, theme::BODY, color))
 }
 
-fn file_stem(path: &std::path::Path) -> String {
+fn file_stem(path: &Path) -> String {
     path.file_stem().map_or_else(
         || path.display().to_string(),
         |stem| stem.to_string_lossy().into_owned(),
@@ -608,7 +614,7 @@ fn status_cell(game: &GameView, entry: &Entry) -> Element {
     status_text(label, details, color)
 }
 
-fn status_text(label: String, details: String, color: freya::prelude::Color) -> Element {
+fn status_text(label: String, details: String, color: Color) -> Element {
     let shown = rect()
         .width(Size::fill())
         .horizontal()
@@ -673,7 +679,7 @@ fn footer(ui: Ui, game: &GameView) -> Rect {
         .padding((14., 28.))
         .spacing(8.)
         .background(WINDOW)
-        .border(theme::edge((true, false, false, false)))
+        .border(theme::edge(Side::Top))
         .child(main_action)
         .child(theme::dimmed(
             applied && idle,
@@ -698,7 +704,7 @@ fn footer(ui: Ui, game: &GameView) -> Rect {
             .child(theme::dimmed(
                 session::can_export(game) && idle,
                 theme::secondary_with(icons::EXPORT, "Export patch…")
-                    .on_press(move |_| super::dialogs::save_zip(ui)),
+                    .on_press(move |_| dialogs::save_zip(ui)),
             )),
         )
         .child(theme::dimmed(
@@ -738,7 +744,7 @@ fn progress_line(ui: Ui, progress: &session::Progress) -> Rect {
         .child(theme::line(progress.step.clone(), CAPTION + 1., SECONDARY).width(Size::flex(1.)))
         .maybe_child(ui.stoppable.read().then(|| {
             rect()
-                .layer(Layer::OverlayLevel(super::BLOCKER_LAYER + 1))
+                .layer(Layer::OverlayLevel(BLOCKER_LAYER + 1))
                 .child(theme::secondary_with(icons::STOP, "Stop").on_press(|_| tasks::stop()))
         }))
 }

@@ -13,6 +13,7 @@ pub struct Extracted {
     pub path: Option<PathBuf>,
 }
 
+#[must_use]
 pub fn plan_files(fonts: &[LegacyFont], data_dir: &Path) -> Vec<Extracted> {
     let repeats = count_repeats(fonts);
     fonts
@@ -44,7 +45,7 @@ fn place_file(
         .get(&(font.file.clone(), stem.clone()))
         .is_some_and(|count| *count > 1)
     {
-        stem = format!("{stem} {}", font.reference.1);
+        stem = format!("{stem} {}", font.reference.path_id);
     }
     let folder = match font.file.strip_prefix(data_dir) {
         Ok(relative) => relative.to_path_buf(),
@@ -60,6 +61,7 @@ fn detect_suffix(data: &[u8]) -> &'static str {
         .map_or(".ttf", |(_, suffix)| suffix)
 }
 
+#[must_use]
 pub fn safe_stem(name: &str) -> String {
     let replaced: String = name
         .chars()
@@ -103,7 +105,7 @@ mod tests {
     fn legacy(name: &str, path_id: i64, data: &[u8], file: &str) -> LegacyFont {
         LegacyFont {
             file: Path::new(DATA).join(file),
-            reference: ("CAB-1".to_string(), path_id),
+            reference: ("CAB-1".to_string(), path_id).into(),
             name: name.to_string(),
             data: data.to_vec(),
             os_names: Vec::new(),

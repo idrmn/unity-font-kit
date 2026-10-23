@@ -1,8 +1,10 @@
+use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+use crate::downloads;
 use crate::fonts::charsets;
 use crate::game::folder::{self, Game};
 use crate::game::typetrees;
@@ -10,14 +12,10 @@ use crate::progress::{Progress, Report};
 use crate::rebuild::inject::{Done, Options};
 use crate::work::build::{self, Built};
 use crate::work::plan::{self, Entry, Kind, Plan};
-use crate::work::project::{self, Project};
+use crate::work::project::{self, Hashes, Project};
 
-use super::scanning::prepare_generator;
-use super::state::{
-    self, FontResult, Saved, Wanted, detect_state, list_wanted, open_game_in, open_work,
-    result_key, to_choices, to_wanted,
-};
-use super::{FontKey, GameRecord, GameState, GameView};
+use super::state::{self, FontResult, Saved, Wanted};
+use super::{FontKey, GameRecord, GameState, GameView, scanning};
 
 /// Proton games show the .exe as an argument, not as the program.
 pub fn is_game_running(record: &GameRecord) -> bool {
@@ -44,14 +42,14 @@ pub fn apply(view: &GameView, progress: Report) -> Result<GameView> {
         bail!("Scan the game first");
     };
     let saved = state::load_saved(&work)?;
-    let wanted = list_wanted(plan, &work.plan);
-    let applied_now = detect_state(&work, &game.data_dir)? == GameState::Applied;
+    let wanted = state::list_wanted(plan, &work.plan);
+    let applied_now = state::detect_state(&work, &game.data_dir)? == GameState::Applied;
     if is_unchanged(
         &wanted,
         &saved,
         applied_now && saved.has_letters(&view.letters),
     ) {
-        return open_game_in(&view.home, &view.record);
+        return state::open_game_in(&view.home, &view.record);
     }
     reject_unwritable(&game.data_dir)?;
     if wanted.is_empty() {
@@ -64,18 +62,22 @@ pub fn apply(view: &GameView, progress: Report) -> Result<GameView> {
             Ok(results) => {
                 let kept: Wanted = wanted
                     .iter()
-                    .filter(|(key, _)| !failed.iter().any(|f| result_key(f) == **key))
+                    .filter(|(key, _)| {
+                        !failed
+                            .iter()
+                            .any(|failure| state::result_key(failure) == **key)
+                    })
                     .map(|(key, value)| (key.clone(), value.clone()))
                     .collect();
                 let applied = Saved {
-                    applied: to_choices(&kept),
+                    applied: state::to_choices(&kept),
                     results: [results, failed].concat(),
                     numbers: Vec::new(),
                     letters: super::join_text(&view.letters),
                     ..saved
                 };
                 state::store_saved(&work, &applied)?;
-                return open_game_in(&view.home, &view.record);
+                return state::open_game_in(&view.home, &view.record);
             }
             Err(error) => {
                 let blamed = blame(&trying, &wanted, &format!("{error:#}"));
@@ -99,7 +101,10 @@ fn without_fonts(plan: &Plan, failed: &[FontResult]) -> Plan {
         .fonts
         .iter()
         .map(|entry| Entry {
-            skip: entry.skip || failed.iter().any(|f| result_key(f) == FontKey::of(entry)),
+            skip: entry.skip
+                || failed
+                    .iter()
+                    .any(|failure| state::result_key(failure) == FontKey::of(entry)),
             ..entry.clone()
         })
         .collect();
@@ -132,13 +137,13 @@ pub fn restore(view: &GameView) -> Result<GameView> {
             ..saved
         },
     )?;
-    open_game_in(&view.home, &view.record)
+    state::open_game_in(&view.home, &view.record)
 }
 
 /// Puts the original game files back, then deletes everything ufk kept for the game.
 pub fn remove_game_data(record: &GameRecord) -> Result<()> {
-    let home = crate::downloads::find_home()?;
-    let work = open_work(&home, record)?;
+    let home = downloads::find_home()?;
+    let work = state::open_work(&home, record)?;
     let backed_up = !project::list_files(&work.backup)?.is_empty();
     match super::open_game(record) {
         Ok(view) => {
@@ -153,7 +158,7 @@ pub fn remove_game_data(record: &GameRecord) -> Result<()> {
     }
     let folder = state::project_folder(&home, record);
     match std::fs::remove_dir_all(&folder) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
             Err(error).with_context(|| format!("Cannot delete {}", folder.display()))
         }
         _ => Ok(()),
@@ -163,12 +168,12 @@ pub fn remove_game_data(record: &GameRecord) -> Result<()> {
 /// The changed files become the originals, so their old backups are deleted.
 pub fn accept_update(view: &GameView) -> Result<GameView> {
     let game = folder::locate(&view.record.folder)?;
-    let work = open_work(&view.home, &view.record)?;
+    let work = state::open_work(&view.home, &view.record)?;
     let updated = state::find_updated_files(&work, &game.data_dir)?;
     for file in &updated {
         remove_file(&work.backup.join(file))?;
     }
-    let installed: project::Hashes = project::read_installed(&work)?
+    let installed: Hashes = project::read_installed(&work)?
         .into_iter()
         .filter(|(file, _)| !updated.contains(file))
         .collect();
@@ -190,7 +195,7 @@ pub fn accept_update(view: &GameView) -> Result<GameView> {
             ..saved
         },
     )?;
-    open_game_in(&view.home, &view.record)
+    state::open_game_in(&view.home, &view.record)
 }
 
 pub(crate) fn prepare_change(view: &GameView) -> Result<(Game, Project)> {
@@ -198,8 +203,8 @@ pub(crate) fn prepare_change(view: &GameView) -> Result<(Game, Project)> {
         bail!("Close the game first");
     }
     let game = folder::locate(&view.record.folder)?;
-    let work = open_work(&view.home, &view.record)?;
-    if let GameState::Updated { files } = detect_state(&work, &game.data_dir)? {
+    let work = state::open_work(&view.home, &view.record)?;
+    if let GameState::Updated { files } = state::detect_state(&work, &game.data_dir)? {
         bail!(
             "The game changed since its fonts were applied ({}): click Use new game files first",
             files.join(", ")
@@ -210,7 +215,7 @@ pub(crate) fn prepare_change(view: &GameView) -> Result<(Game, Project)> {
 
 pub(crate) fn is_unchanged(wanted: &Wanted, saved: &Saved, applied_now: bool) -> bool {
     let clean = saved.results.iter().all(|result| result.error.is_none());
-    clean && applied_now != wanted.is_empty() && *wanted == to_wanted(&saved.applied)
+    clean && applied_now != wanted.is_empty() && *wanted == state::to_wanted(&saved.applied)
 }
 
 /// On Windows a game under Program Files needs administrator rights.
@@ -237,10 +242,13 @@ fn build_and_install(
     work: &Project,
     progress: Report,
 ) -> Result<Vec<FontResult>> {
-    let (shared, borrowed) = build::share_family_sources(plan.clone());
+    let build::Shared {
+        plan: shared,
+        notes: borrowed,
+    } = build::share_family_sources(plan.clone());
     let charset = plan::read_charset(&shared, &work.plan)?;
     let flaws = build::check_sources(&build::select_entries(&shared)?, &work.plan, &charset)?;
-    let generator = prepare_generator(game, progress)?;
+    let generator = scanning::prepare_generator(game, progress)?;
     let options = Options {
         raw_note: typetrees::describe_raw_reading(game),
     };
@@ -387,7 +395,7 @@ fn blame(plan: &Plan, wanted: &Wanted, error: &str) -> Vec<FontResult> {
 
 fn remove_file(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
             Err(error).with_context(|| format!("Cannot delete {}", path.display()))
         }
         _ => Ok(()),
@@ -396,7 +404,7 @@ fn remove_file(path: &Path) -> Result<()> {
 
 fn remove_dir(path: &Path) -> Result<()> {
     match std::fs::remove_dir_all(path) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
             Err(error).with_context(|| format!("Cannot delete {}", path.display()))
         }
         _ => Ok(()),
@@ -444,9 +452,9 @@ mod tests {
             unity_version: "2020.3.12f1".to_string(),
             backend: Backend::Mono,
         };
-        let work = open_work(&home, &record).unwrap();
+        let work = state::open_work(&home, &record).unwrap();
         std::fs::create_dir_all(&work.backup).unwrap();
-        let mut installed = project::Hashes::new();
+        let mut installed = Hashes::new();
         for (file, original) in files {
             std::fs::write(data.join(file), "patched").unwrap();
             std::fs::write(work.backup.join(file), original).unwrap();
@@ -473,13 +481,13 @@ mod tests {
         };
         let plan = plan_of(vec![body]);
         project::write_text(&work.plan, &plan::to_json(&plan).unwrap()).unwrap();
-        let wanted = list_wanted(&plan, &work.plan);
+        let wanted = state::list_wanted(&plan, &work.plan);
         let saved = Saved {
-            applied: to_choices(&wanted),
+            applied: state::to_choices(&wanted),
             ..Saved::default()
         };
         state::store_saved(&work, &saved).unwrap();
-        let view = open_game_in(&home, &record).unwrap();
+        let view = state::open_game_in(&home, &record).unwrap();
         // resources.assets holds no font, so a build would fail: only a skipped apply succeeds.
         let after = apply(&view, &crate::progress::silent).unwrap();
         assert_eq!(after, view);
@@ -498,7 +506,7 @@ mod tests {
         ];
         let (home, record, data, work) = patched_game(tmp.path(), &files);
         std::fs::write(data.join("resources.assets"), "updated").unwrap();
-        let view = open_game_in(&home, &record).unwrap();
+        let view = state::open_game_in(&home, &record).unwrap();
         assert!(matches!(view.state, GameState::Updated { .. }));
         accept_update(&view).unwrap();
         project::restore(&work, &data).unwrap();

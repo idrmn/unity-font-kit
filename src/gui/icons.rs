@@ -36,6 +36,7 @@ icons! {
 
 const SIZE: f32 = 16.;
 
+#[must_use]
 pub fn draw(icon: Icon, color: Color) -> SvgViewer {
     SvgViewer::new((icon.name, icon.data))
         .width(Size::px(SIZE))

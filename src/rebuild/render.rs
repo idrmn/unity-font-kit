@@ -1,10 +1,14 @@
 //! Glyph tiles for a TMP atlas, drawn the way Unity's TMP draws them with FreeType.
 
+use std::ops::RangeInclusive;
+
 use anyhow::Result;
 use indexmap::IndexMap;
 use kiddo::{ImmutableKdTree, SquaredEuclidean};
 
 use super::distance::{self, Mask};
+use super::kerning;
+use super::pack::Size;
 use crate::freetype::{
     Face, Glyph, LOAD_DEFAULT, LOAD_NO_HINTING, LOAD_TARGET_MONO, Library, PIXEL_MODE_MONO,
     RENDER_MONO, RENDER_NORMAL, RENDER_SDF,
@@ -21,9 +25,9 @@ const SDF_AA: u32 = 0x40;
 const UNSUPPORTED: u32 = 0x80 | 0x100 | 0x200 | 0x10000;
 const UPSAMPLING: [(u32, i64); 4] = [(0x1000, 1), (0x2000, 8), (0x4000, 16), (0x8000, 32)];
 // FreeType rejects other bsdf spreads and silently keeps the previous one.
-const BSDF_SPREADS: (i32, i32) = (2, 32);
+const BSDF_SPREADS: RangeInclusive<i32> = 2..=32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Gray {
     pub width: usize,
     pub height: usize,
@@ -31,14 +35,6 @@ pub struct Gray {
 }
 
 impl Gray {
-    fn empty() -> Gray {
-        Gray {
-            width: 0,
-            height: 0,
-            data: Vec::new(),
-        }
-    }
-
     fn zeros(width: usize, height: usize) -> Gray {
         Gray {
             width,
@@ -47,6 +43,7 @@ impl Gray {
         }
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -68,7 +65,7 @@ pub struct Tile {
     pub metrics: Metrics,
     pub pixels: Gray,
     /// The glyph rect size in the atlas, without padding.
-    pub size: (usize, usize),
+    pub size: Size,
 }
 
 #[derive(Debug)]
@@ -78,10 +75,12 @@ pub struct Style {
     pub point_size: i64,
 }
 
+#[must_use]
 pub fn is_sdfaa(mode: u32) -> bool {
     mode & SDF_AA != 0
 }
 
+#[must_use]
 pub fn upsampling(mode: u32) -> Option<i64> {
     if mode & SDF == 0 || is_sdfaa(mode) {
         return None;
@@ -89,9 +88,10 @@ pub fn upsampling(mode: u32) -> Option<i64> {
     UPSAMPLING
         .iter()
         .find(|(bit, _)| mode & bit != 0)
-        .map(|(_, up)| *up)
+        .map(|(_, factor)| *factor)
 }
 
+#[must_use]
 pub fn is_distance_field(mode: u32) -> bool {
     upsampling(mode).is_some() || is_sdfaa(mode)
 }
@@ -100,6 +100,7 @@ fn is_raster(mode: u32) -> bool {
     mode & (BITMAP | SDF | SDF_AA) == 0
 }
 
+#[must_use]
 pub fn is_known(mode: u32) -> bool {
     mode & UNSUPPORTED == 0 && UPSAMPLING.iter().any(|(bit, _)| mode & bit != 0)
 }
@@ -118,8 +119,9 @@ fn load_flags(mode: u32) -> i32 {
 }
 
 /// Measured: Unity 2020.3 hints like FreeType's TrueType interpreter 35, Unity 6000.3 like 40.
+#[must_use]
 pub fn interpreter_for(unity_version: &str) -> u32 {
-    if super::kerning::is_before_unity6(unity_version) {
+    if kerning::is_before_unity6(unity_version) {
         35
     } else {
         40
@@ -144,8 +146,8 @@ pub fn render_glyphs(
 }
 
 fn render_glyph(library: &Library, face: &Face, index: u32, style: &Style) -> Result<Tile> {
-    if let Some(up) = upsampling(style.render_mode) {
-        return render_upsampled_sdf(face, index, style, up);
+    if let Some(factor) = upsampling(style.render_mode) {
+        return render_upsampled_sdf(face, index, style, factor);
     }
     face.load_glyph(index, load_flags(style.render_mode))?;
     let metrics = read_metrics(&face.glyph(), 1);
@@ -159,7 +161,10 @@ fn render_glyph(library: &Library, face: &Face, index: u32, style: &Style) -> Re
     };
     face.render(mode)?;
     let bitmap = read_bitmap(&face.glyph());
-    let size = (bitmap.width, bitmap.height);
+    let size = Size {
+        width: bitmap.width,
+        height: bitmap.height,
+    };
     let pixels = if bitmap.is_empty() {
         bitmap
     } else {
@@ -187,7 +192,7 @@ fn read_metrics(glyph: &Glyph, upsampling: i64) -> Metrics {
 fn read_bitmap(glyph: &Glyph) -> Gray {
     let (rows, columns) = (glyph.rows as usize, glyph.columns as usize);
     if rows == 0 || columns == 0 {
-        return Gray::empty();
+        return Gray::default();
     }
     let pitch = glyph.pitch.unsigned_abs() as usize;
     let mono = glyph.pixel_mode == PIXEL_MODE_MONO;
@@ -255,12 +260,18 @@ fn render_bitmap_sdf(
             index,
             metrics,
             pixels: plain,
-            size: (0, 0),
+            size: Size {
+                width: 0,
+                height: 0,
+            },
         });
     }
-    let size = (plain.width, plain.height);
+    let size = Size {
+        width: plain.width,
+        height: plain.height,
+    };
     let spread = i32::try_from(padding)? + 1;
-    if spread < BSDF_SPREADS.0 || spread > BSDF_SPREADS.1 {
+    if !BSDF_SPREADS.contains(&spread) {
         return Ok(Tile {
             index,
             metrics,
@@ -322,26 +333,30 @@ fn to_byte(value: f64) -> u8 {
 }
 
 /// A monochrome raster at N times the size gives the exact edge, as TMP's SDF8/16/32 modes do.
-fn render_upsampled_sdf(face: &Face, index: u32, style: &Style, up: i64) -> Result<Tile> {
-    face.set_char_size(style.point_size * up * 64)?;
-    let drawn = draw_mono(face, index, up);
+fn render_upsampled_sdf(face: &Face, index: u32, style: &Style, upsampling: i64) -> Result<Tile> {
+    face.set_char_size(style.point_size * upsampling * 64)?;
+    let drawn = draw_mono(face, index, upsampling);
     face.set_char_size(style.point_size * 64)?;
-    let (metrics, inside, origin) = drawn?;
-    if !inside.any() {
+    let raster = drawn?;
+    let metrics = raster.metrics;
+    if !raster.inside.any() {
         return Ok(Tile {
             index,
             metrics,
-            pixels: Gray::empty(),
-            size: (0, 0),
+            pixels: Gray::default(),
+            size: Size {
+                width: 0,
+                height: 0,
+            },
         });
     }
     // TMP sizes the glyph rect by the raster, not by the outline metrics (they differ on 4 of 364 glyphs).
-    let up_size = up as usize;
-    let size = (
-        inside.width.div_ceil(up_size),
-        inside.height.div_ceil(up_size),
-    );
-    let pixels = sample_distance(&inside, origin, metrics, size, style.padding, up);
+    let factor = upsampling as usize;
+    let size = Size {
+        width: raster.inside.width.div_ceil(factor),
+        height: raster.inside.height.div_ceil(factor),
+    };
+    let pixels = sample_distance(&raster, size, style.padding, upsampling);
     Ok(Tile {
         index,
         metrics,
@@ -350,9 +365,16 @@ fn render_upsampled_sdf(face: &Face, index: u32, style: &Style, up: i64) -> Resu
     })
 }
 
-fn draw_mono(face: &Face, index: u32, up: i64) -> Result<(Metrics, Mask, (i64, i64))> {
+struct MonoRaster {
+    metrics: Metrics,
+    inside: Mask,
+    left: i64,
+    top: i64,
+}
+
+fn draw_mono(face: &Face, index: u32, upsampling: i64) -> Result<MonoRaster> {
     face.load_glyph(index, LOAD_NO_HINTING | LOAD_TARGET_MONO)?;
-    let metrics = read_metrics(&face.glyph(), up);
+    let metrics = read_metrics(&face.glyph(), upsampling);
     face.render(RENDER_MONO)?;
     let glyph = face.glyph();
     let bitmap = read_bitmap(&glyph);
@@ -361,33 +383,33 @@ fn draw_mono(face: &Face, index: u32, up: i64) -> Result<(Metrics, Mask, (i64, i
         height: bitmap.height,
         cells: bitmap.data.iter().map(|value| *value > 127).collect(),
     };
-    Ok((
+    Ok(MonoRaster {
         metrics,
         inside,
-        (i64::from(glyph.bitmap_left), i64::from(glyph.bitmap_top)),
-    ))
+        left: i64::from(glyph.bitmap_left),
+        top: i64::from(glyph.bitmap_top),
+    })
 }
 
-fn sample_distance(
-    inside: &Mask,
-    origin: (i64, i64),
-    metrics: Metrics,
-    size: (usize, usize),
-    padding: usize,
-    up: i64,
-) -> Gray {
+fn sample_distance(raster: &MonoRaster, size: Size, padding: usize, upsampling: i64) -> Gray {
+    let MonoRaster {
+        metrics,
+        inside,
+        left,
+        top,
+    } = raster;
     let spread = (padding + 1) as f64;
-    let (width, height) = (size.0 + 2 * padding, size.1 + 2 * padding);
+    let (width, height) = (size.width + 2 * padding, size.height + 2 * padding);
     let pad = padding as i64;
-    let upf = up as f64;
+    let factor = upsampling as f64;
     let cols: Vec<i64> = (0..width as i64)
         .map(|i| {
-            ((((i - pad) as f64 + 0.5) + metrics.bearing_x) * upf - origin.0 as f64).floor() as i64
+            ((((i - pad) as f64 + 0.5) + metrics.bearing_x) * factor - *left as f64).floor() as i64
         })
         .collect();
     let rows: Vec<i64> = (0..height as i64)
         .map(|j| {
-            (origin.1 as f64 - (metrics.bearing_y - ((j - pad) as f64 + 0.5)) * upf).floor() as i64
+            (*top as f64 - (metrics.bearing_y - ((j - pad) as f64 + 0.5)) * factor).floor() as i64
         })
         .collect();
     let (outer, inner) = list_edges(inside);
@@ -400,7 +422,7 @@ fn sample_distance(
             } else {
                 0.5 - field.to_inner(row, col)
             };
-            let sampled = d / upf;
+            let sampled = d / factor;
             data.push(to_byte(127.5 + sampled * 255.0 / (2.0 * spread)));
         }
     }

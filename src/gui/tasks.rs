@@ -4,8 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use freya::prelude::{WritableUtils, spawn_forever};
 
-use super::Ui;
+use super::ui::{Dialog, Ui};
 use crate::progress::{self, Progress, Report};
+use crate::session;
 
 // One task runs at a time, so one flag tells it to stop.
 static STOP: AtomicBool = AtomicBool::new(false);
@@ -29,12 +30,13 @@ pub fn run_stoppable<T: Send + 'static>(
 }
 
 /// One task runs at a time; a second one is refused aloud rather than dropped.
+#[must_use]
 pub fn reject_busy(ui: Ui) -> bool {
     let Some(running) = ui.busy.peek().clone() else {
         return false;
     };
     let mut dialog = ui.dialog;
-    dialog.set(super::Dialog::Notice(format!(
+    dialog.set(Dialog::Notice(format!(
         "ufk is busy: {}. Try again when it ends.",
         running.step
     )));
@@ -92,6 +94,7 @@ fn start<T: Send + 'static>(
                 let _ = sender.try_send(progress);
                 !STOP.load(Ordering::Relaxed)
             };
+            // A bug in the work shows as an error instead of ending the app.
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&report)))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("ufk stopped on an internal error")))
         })
@@ -120,7 +123,8 @@ fn reload_view(ui: Ui) {
     let mut view = ui.view;
     spawn_forever(async move {
         let id = record.id.clone();
-        let Ok(fresh) = blocking::unblock(move || crate::session::open_game(&record)).await else {
+        // The task's own error is already shown; a failed reload adds nothing to it.
+        let Ok(fresh) = blocking::unblock(move || session::open_game(&record)).await else {
             return;
         };
         if view

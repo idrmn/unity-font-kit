@@ -1,11 +1,13 @@
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use tempfile::NamedTempFile;
+use ureq::Agent;
 
 const HOME: &str = "ufk";
 
@@ -19,7 +21,9 @@ pub fn find_home() -> Result<PathBuf> {
     Ok(base.join(HOME))
 }
 
-pub fn hash_files(paths: &[PathBuf]) -> Result<String> {
+pub fn hash_files(paths: &[&Path]) -> Result<String> {
+    use sha2::Digest;
+    use std::io::Read;
     let mut digest = Sha256::new();
     for path in paths {
         let file = File::open(path).with_context(|| format!("Cannot read {}", path.display()))?;
@@ -36,7 +40,7 @@ pub fn hash_files(paths: &[PathBuf]) -> Result<String> {
     Ok(digest
         .finalize()
         .iter()
-        .map(|b| format!("{b:02x}"))
+        .map(|byte| format!("{byte:02x}"))
         .collect())
 }
 
@@ -67,8 +71,8 @@ pub fn fetch(url: &str, sha256: &str, target: &Path, purpose: &str) -> Result<Pa
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-fn make_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+fn make_agent() -> Agent {
+    Agent::config_builder()
         .timeout_connect(Some(CONNECT_TIMEOUT))
         .timeout_recv_response(Some(CONNECT_TIMEOUT))
         .timeout_recv_body(Some(DOWNLOAD_TIMEOUT))
@@ -76,6 +80,7 @@ fn make_agent() -> ureq::Agent {
         .into()
 }
 
+#[must_use]
 pub fn hidden_command(program: &Path) -> Command {
     hide_window(Command::new(program))
 }
@@ -93,11 +98,12 @@ fn hide_window(command: Command) -> Command {
     command
 }
 
+#[must_use]
 pub fn is_intact(path: &Path, sha256: &str) -> bool {
-    path.is_file() && hash_files(&[path.to_path_buf()]).is_ok_and(|hash| hash == sha256)
+    path.is_file() && hash_files(&[path]).is_ok_and(|hash| hash == sha256)
 }
 
-fn publish_file(partial: tempfile::NamedTempFile, target: &Path, sha256: &str) -> Result<()> {
+fn publish_file(partial: NamedTempFile, target: &Path, sha256: &str) -> Result<()> {
     match partial.persist(target) {
         Ok(_) => Ok(()),
         // Another run may have put the same file in place and be running it now.
@@ -110,8 +116,9 @@ fn publish_file(partial: tempfile::NamedTempFile, target: &Path, sha256: &str) -
 
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
+    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(path, Permissions::from_mode(0o755))?;
     Ok(())
 }
 

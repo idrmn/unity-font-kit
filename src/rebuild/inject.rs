@@ -1,9 +1,12 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::error::Error;
+use std::fmt;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
 use rabex::files::serializedfile::ObjectInfo;
 use rabex::objects::ClassId;
@@ -14,15 +17,18 @@ use serde_json::{Value, json};
 use super::recipe::{self, Recipe};
 use super::render::{self, Gray};
 use super::{bake, legacy};
-use crate::game::assets::{self, Changed, Source, Unit, int_field};
-use crate::game::scan::{self, Pointers, Reader, STATIC_POPULATION, TMP_FONT, TmpFont};
+use crate::game::assets::{self, Changed, Fit, Source, Tpk, Unit};
+use crate::game::folder;
+use crate::game::scan::{
+    self, AtlasSize, Pointers, Reader, Ref, STATIC_POPULATION, TMP_FONT, TmpFont,
+};
 use crate::game::texture;
-use crate::game::tmp_schema::{self, Tree, number};
-use crate::game::{folder, typetrees::Generator};
+use crate::game::tmp_schema::{self, Tree};
+use crate::game::typetrees::Generator;
 use crate::progress::{self, Report};
 use crate::work::project;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Options {
     pub raw_note: String,
 }
@@ -47,7 +53,6 @@ pub struct Injected {
     pub file: String,
     pub font: String,
     pub characters: usize,
-    pub atlas: (usize, usize),
     pub resized: bool,
     pub materials: usize,
     pub lost: String,
@@ -101,46 +106,52 @@ pub enum Done {
     Cleared(Cleared),
 }
 
-/// (serialized file, font path id) -> (font name, atlas path ids)
-pub type FontAtlases = IndexMap<(String, i64), (String, HashSet<i64>)>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontAtlas {
+    pub name: String,
+    pub atlas_ids: HashSet<i64>,
+}
 
-struct Material {
-    unit: Rc<Unit>,
-    info: ObjectInfo,
+/// Keyed by the font's reference.
+pub type FontAtlases = IndexMap<Ref, FontAtlas>;
+
+struct Material<'file> {
+    unit: &'file Unit,
+    info: &'file ObjectInfo,
     node: TypeTreeNode,
     value: Value,
 }
 
-/// (serialized file, main texture path id) -> materials
-type Materials = HashMap<(String, i64), Vec<Material>>;
+/// Keyed by the main texture's reference.
+type Materials<'file> = HashMap<Ref, Vec<Material<'file>>>;
 
 #[derive(Default)]
-struct FileIndex {
+struct FileIndex<'file> {
     atlases: FontAtlases,
-    materials: Materials,
+    materials: Materials<'file>,
 }
 
 /// A field the font asset lacks, reported as an unexpected font asset layout.
 #[derive(Debug)]
 struct Missing(String);
 
-impl std::fmt::Display for Missing {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Missing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "'{}'", self.0)
     }
 }
 
-impl std::error::Error for Missing {}
+impl Error for Missing {}
 
-struct Opened<'a> {
-    source: &'a Source,
-    reader: &'a Reader<'a>,
+struct Opened<'file> {
+    source: &'file Source,
+    reader: &'file Reader<'file>,
 }
 
 pub fn load_bake(recipe_path: &Path) -> Result<Bake> {
     let built = recipe::load(recipe_path)?;
     let baked = recipe::load_baked(recipe_path)?;
-    let (_, atlas_png) = recipe::artifact_paths(recipe_path)?;
+    let atlas_png = recipe::artifact_paths(recipe_path)?.png;
     if !baked.get("glyphs").is_some_and(is_truthy)
         || !baked.get("characters").is_some_and(is_truthy)
     {
@@ -148,8 +159,12 @@ pub fn load_bake(recipe_path: &Path) -> Result<Bake> {
     }
     let atlas = texture::read_png_alpha(&atlas_png)?;
     let size = (
-        baked.get("atlas_width").map_or(0, |v| number(v) as usize),
-        baked.get("atlas_height").map_or(0, |v| number(v) as usize),
+        baked
+            .get("atlas_width")
+            .map_or(0, |v| tmp_schema::number(v) as usize),
+        baked
+            .get("atlas_height")
+            .map_or(0, |v| tmp_schema::number(v) as usize),
     );
     if (atlas.width, atlas.height) != size {
         bail!(
@@ -169,10 +184,10 @@ pub fn load_bake(recipe_path: &Path) -> Result<Bake> {
 }
 
 #[derive(Debug)]
-pub struct Files<'a> {
-    pub data_dir: &'a Path,
-    pub originals: Option<&'a Path>,
-    pub out_dir: &'a Path,
+pub struct Files<'run> {
+    pub data_dir: &'run Path,
+    pub originals: Option<&'run Path>,
+    pub out_dir: &'run Path,
 }
 
 #[derive(Debug, Default)]
@@ -279,14 +294,14 @@ fn run_jobs(
     };
     let index = index_file(&context, jobs)?;
     let mut changed = Changed::new();
-    let done = jobs
-        .iter()
-        .map(|job| run_job(&context, &index, job, options, &mut changed))
-        .collect::<Result<Vec<_>>>()?;
+    let mut done = Vec::new();
+    for job in jobs {
+        done.push(run_job(&context, &index, job, options, &mut changed)?);
+    }
     Ok((done, changed))
 }
 
-fn index_file(context: &Opened, jobs: &[Job]) -> Result<FileIndex> {
+fn index_file<'file>(context: &Opened<'file>, jobs: &[Job]) -> Result<FileIndex<'file>> {
     // Reading every TMP font and material is slow in big files, so it is done once and only when needed.
     if jobs.iter().all(|job| matches!(job, Job::Swap(_))) {
         return Ok(FileIndex::default());
@@ -357,7 +372,7 @@ fn reset_tree(
     };
     let population = tree
         .get("m_AtlasPopulationMode")
-        .map_or(STATIC_POPULATION as f64, number);
+        .map_or(STATIC_POPULATION as f64, tmp_schema::number);
     if population == STATIC_POPULATION as f64 {
         bail!(
             "{}: not a dynamic font any more, scan the game again",
@@ -370,13 +385,13 @@ fn reset_tree(
         .and_then(Value::as_array)
         .and_then(|atlases| atlases.first())
         .unwrap_or(&empty);
-    if int_field(atlas, "m_FileID") != 0 {
+    if assets::int_field(atlas, "m_FileID") != 0 {
         bail!(
             "{}: its atlas is in another game file, ufk cannot clear it",
             job.font
         );
     }
-    let atlas_id = int_field(atlas, "m_PathID");
+    let atlas_id = assets::int_field(atlas, "m_PathID");
     let sharing = list_sharing(atlases, &job.serialized_file, job.path_id, atlas_id);
     if !sharing.is_empty() {
         bail!(
@@ -386,7 +401,8 @@ fn reset_tree(
         );
     }
     let face_info = require(tree, "m_FaceInfo")?;
-    let point_size = number(require_value(face_info, "m_PointSize")?).round_ties_even() as i64;
+    let point_size =
+        tmp_schema::number(require_value(face_info, "m_PointSize")?).round_ties_even() as i64;
     let data = std::fs::read(&job.source)
         .with_context(|| format!("Cannot read {}", job.source.display()))?;
     let face = bake::read_font_face_info(&data, point_size, &job.unity_version)?;
@@ -401,8 +417,8 @@ pub fn clear_dynamic(tree: &Tree, face: &Value) -> Result<Tree> {
         .and_then(|mode| u32::try_from(mode).ok());
     let is_sdf = mode.is_some_and(render::is_distance_field);
     let spacing = i64::from(is_sdf);
-    let width = number(require(tree, "m_AtlasWidth")?) as i64 - spacing;
-    let height = number(require(tree, "m_AtlasHeight")?) as i64 - spacing;
+    let width = tmp_schema::number(require(tree, "m_AtlasWidth")?) as i64 - spacing;
+    let height = tmp_schema::number(require(tree, "m_AtlasHeight")?) as i64 - spacing;
     let first_atlas: Vec<Value> = tree
         .get("m_AtlasTextures")
         .and_then(Value::as_array)
@@ -437,8 +453,8 @@ pub fn clear_texture(texture: &Value) -> Result<Value> {
         fields.insert("m_IsReadable".to_string(), json!(true));
     }
     let (width, height) = (
-        int_field(texture, "m_Width"),
-        int_field(texture, "m_Height"),
+        assets::int_field(texture, "m_Width"),
+        assets::int_field(texture, "m_Height"),
     );
     if width <= 0 || height <= 0 {
         return Ok(readable);
@@ -543,18 +559,24 @@ fn inject_font(
     write_object(unit, info, &node, &Value::Object(prepared.tree), changed)?;
     let written = texture::write_alpha(&texture, &prepared.atlas)?;
     write_object(atlas_unit, atlas_info, &texture_node, &written, changed)?;
-    let size = (prepared.atlas.width, prepared.atlas.height);
+    let (width, height) = (prepared.atlas.width, prepared.atlas.height);
     let materials = index
         .materials
-        .get(&(built.serialized_file.clone(), atlas_id))
+        .get(&Ref {
+            serialized_file: built.serialized_file.clone(),
+            path_id: atlas_id,
+        })
         .map_or(&[][..], Vec::as_slice);
     Ok(Injected {
         file: built.file.clone(),
         font: built.font.clone(),
         characters: prepared.characters,
-        atlas: size,
-        resized: font.atlas != Some((size.0 as i64, size.1 as i64)),
-        materials: update_materials(materials, size.0, size.1, changed)?,
+        resized: font.atlas
+            != Some(AtlasSize {
+                width: width as i64,
+                height: height as i64,
+            }),
+        materials: update_materials(materials, width, height, changed)?,
         lost: prepared.lost,
     })
 }
@@ -566,30 +588,32 @@ fn read_and_prepare(
     built: &Recipe,
     bake: &Bake,
 ) -> Result<(TmpFont, Prepared)> {
-    let prepared = scan::read_tmp_font(
+    let font = scan::read_tmp_font(
         Path::new(&built.file),
         &Pointers::of(unit),
         info.m_PathID,
         tree,
     )
-    .map_err(|error| anyhow::Error::new(Missing(format!("{error:#}"))))
-    .and_then(|font| {
-        let prepared = prepare_font(&font, tree, bake)?;
-        Ok((font, prepared))
-    });
-    prepared.map_err(|error| match error.downcast::<Missing>() {
-        Ok(missing) => anyhow::anyhow!(
-            "{}: unexpected font asset layout, missing {missing}",
-            built.font
-        ),
-        Err(error) => error,
-    })
+    .map_err(|error| layout_error(built, &Missing(format!("{error:#}"))))?;
+    let prepared =
+        prepare_font(&font, tree, bake).map_err(|error| match error.downcast::<Missing>() {
+            Ok(missing) => layout_error(built, &missing),
+            Err(error) => error,
+        })?;
+    Ok((font, prepared))
+}
+
+fn layout_error(built: &Recipe, missing: &Missing) -> anyhow::Error {
+    anyhow!(
+        "{}: unexpected font asset layout, missing {missing}",
+        built.font
+    )
 }
 
 pub fn prepare_font(font: &TmpFont, tree: &Tree, bake: &Bake) -> Result<Prepared> {
     let baked_codes: HashSet<i64> = list(&bake.baked, "characters")?
         .iter()
-        .map(|c| Ok(number(require_value(c, "m_Unicode")?) as i64))
+        .map(|c| Ok(tmp_schema::number(require_value(c, "m_Unicode")?) as i64))
         .collect::<Result<_>>()?;
     let lost: HashSet<i64> = font
         .codepoints
@@ -612,16 +636,16 @@ fn require_own_atlas(
     built: &Recipe,
 ) -> Result<i64> {
     let refs = tmp_schema::read_atlas_refs(tree);
-    if refs.len() != 1 {
+    let [atlas_ref] = refs.as_slice() else {
         bail!(
             "{}: has {} atlas textures, only single-atlas fonts are supported",
             built.font,
             refs.len()
         );
-    }
+    };
     let (file_id, atlas_id) = (
-        int_field(&refs[0], "m_FileID"),
-        int_field(&refs[0], "m_PathID"),
+        assets::int_field(atlas_ref, "m_FileID"),
+        assets::int_field(atlas_ref, "m_PathID"),
     );
     let found = find_object(source, &built.serialized_file, atlas_id);
     let Some((_, info)) = found.filter(|_| file_id == 0) else {
@@ -665,12 +689,12 @@ fn list_font_atlases(context: &Opened) -> FontAtlases {
                 .and_then(Value::as_str)
                 .unwrap_or("?")
                 .to_string();
-            let ids = tmp_schema::read_atlas_refs(&tree)
+            let atlas_ids: HashSet<i64> = tmp_schema::read_atlas_refs(&tree)
                 .iter()
-                .filter(|pptr| int_field(pptr, "m_FileID") == 0)
-                .map(|pptr| int_field(pptr, "m_PathID"))
+                .filter(|pptr| assets::int_field(pptr, "m_FileID") == 0)
+                .map(|pptr| assets::int_field(pptr, "m_PathID"))
                 .collect();
-            atlases.insert((unit.name.clone(), info.m_PathID), (name, ids));
+            atlases.insert(scan::make_ref(unit, info), FontAtlas { name, atlas_ids });
         }
     }
     atlases
@@ -684,10 +708,12 @@ fn list_sharing(
 ) -> Vec<String> {
     atlases
         .iter()
-        .filter(|((file, font_id), (_, ids))| {
-            file == serialized_file && *font_id != path_id && ids.contains(&atlas_id)
+        .filter(|(font, atlas)| {
+            font.serialized_file == serialized_file
+                && font.path_id != path_id
+                && atlas.atlas_ids.contains(&atlas_id)
         })
-        .map(|(_, (name, _))| name.clone())
+        .map(|(_, atlas)| atlas.name.clone())
         .collect()
 }
 
@@ -729,7 +755,7 @@ pub fn rebuild_old_tree(tree: &Tree, baked: &Tree) -> Result<Tree> {
 }
 
 fn has_pixels(rect: &Value) -> bool {
-    number(&rect["m_Width"]) != 0.0 && number(&rect["m_Height"]) != 0.0
+    tmp_schema::number(&rect["m_Width"]) != 0.0 && tmp_schema::number(&rect["m_Height"]) != 0.0
 }
 
 fn rebuild_new_tree(tree: &Tree, baked: &Tree) -> Result<Tree> {
@@ -828,6 +854,7 @@ fn clear_lists(table: &Value) -> Value {
 }
 
 /// The template's fields, filled from `value` where it has them: game fields stay, unknown ones drop.
+#[must_use]
 pub fn conform(value: &Value, template: &Value) -> Value {
     let Value::Object(template) = template else {
         return value.clone();
@@ -847,8 +874,8 @@ pub fn conform(value: &Value, template: &Value) -> Value {
     )
 }
 
-fn list_materials(source: &Source) -> Result<Materials> {
-    let tpk = assets::Tpk::embedded();
+fn list_materials(source: &Source) -> Result<Materials<'_>> {
+    let tpk = Tpk::embedded();
     let mut materials = Materials::new();
     for unit in &source.units {
         for info in unit.file.objects() {
@@ -858,16 +885,19 @@ fn list_materials(source: &Source) -> Result<Materials> {
             let node = assets::node_for(unit, info, &tpk)
                 .context("There are no TypeTree nodes for this object.")?
                 .into_owned();
-            let value = assets::read_value(unit, info, &node, true)?;
+            let value = assets::read_value(unit, info, &node, Fit::Exact)?;
             let Some(texture_id) = find_main_texture_id(&value) else {
                 continue;
             };
             materials
-                .entry((unit.name.clone(), texture_id))
+                .entry(Ref {
+                    serialized_file: unit.name.clone(),
+                    path_id: texture_id,
+                })
                 .or_default()
                 .push(Material {
-                    unit: Rc::clone(unit),
-                    info: info.clone(),
+                    unit,
+                    info,
                     node,
                     value,
                 });
@@ -894,8 +924,8 @@ fn update_materials(
         );
         *floats = Value::Array(updated);
         write_object(
-            &material.unit,
-            &material.info,
+            material.unit,
+            material.info,
             &material.node,
             &value,
             changed,
@@ -904,6 +934,7 @@ fn update_materials(
     Ok(matching.len())
 }
 
+#[must_use]
 pub fn set_atlas_size(floats: &[Value], width: usize, height: usize) -> Vec<Value> {
     let sizes = [
         ("_TextureWidth", width as f64),
@@ -935,10 +966,10 @@ fn find_main_texture_id(material: &Value) -> Option<i64> {
             pair.get("first").and_then(Value::as_str) == Some("_MainTex")
                 && pair
                     .pointer("/second/m_Texture")
-                    .is_some_and(|pptr| int_field(pptr, "m_FileID") == 0)
+                    .is_some_and(|pptr| assets::int_field(pptr, "m_FileID") == 0)
         })
         .and_then(|pair| pair.pointer("/second/m_Texture"))
-        .map(|pptr| int_field(pptr, "m_PathID"))
+        .map(|pptr| assets::int_field(pptr, "m_PathID"))
 }
 
 /// When several units share the name, the last one wins.
@@ -970,7 +1001,7 @@ fn read_tree(
 
 fn object_node(unit: &Unit, info: &ObjectInfo, reader: &Reader) -> Result<TypeTreeNode> {
     assets::node_for(unit, info, &reader.tpk)
-        .map(std::borrow::Cow::into_owned)
+        .map(Cow::into_owned)
         .context("There are no TypeTree nodes for this object.")
 }
 
@@ -981,8 +1012,8 @@ fn read_object(
     node: &TypeTreeNode,
     changed: &Changed,
 ) -> Result<Value> {
-    let Some(bytes) = changed.get(&(unit.name.clone(), info.m_PathID)) else {
-        return assets::read_value(unit, info, node, true);
+    let Some(bytes) = changed.get(&scan::make_ref(unit, info)) else {
+        return assets::read_value(unit, info, node, Fit::Exact);
     };
     let mut reader = Cursor::new(bytes.as_slice());
     let value: Value =
@@ -1005,7 +1036,7 @@ fn write_object(
     changed: &mut Changed,
 ) -> Result<()> {
     let bytes = serde_typetree::to_vec_endianed(value, node, unit.file.m_Header.m_Endianess)?;
-    changed.insert((unit.name.clone(), info.m_PathID), bytes);
+    changed.insert(scan::make_ref(unit, info), bytes);
     Ok(())
 }
 
@@ -1067,12 +1098,6 @@ mod tests {
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR")))
-    }
-
-    fn options() -> Options {
-        Options {
-            raw_note: String::new(),
-        }
     }
 
     fn reset_job(source: PathBuf) -> Reset {
@@ -1322,11 +1347,17 @@ mod tests {
             "m_AtlasTextures": [{"m_FileID": 0, "m_PathID": 82}],
         }));
         let atlases = FontAtlases::from([(
-            ("CAB-1".to_string(), 9),
-            ("Title SDF".to_string(), HashSet::from([82])),
+            Ref {
+                serialized_file: "CAB-1".to_string(),
+                path_id: 9,
+            },
+            FontAtlas {
+                name: "Title SDF".to_string(),
+                atlas_ids: HashSet::from([82]),
+            },
         )]);
         let job = reset_job(PathBuf::from("new.ttf"));
-        let error = reset_tree(Some(&game), &job, &atlases, &options())
+        let error = reset_tree(Some(&game), &job, &atlases, &Options::default())
             .err()
             .unwrap();
         assert!(error.to_string().contains("shared with Title SDF"));
@@ -1348,7 +1379,7 @@ mod tests {
             "m_AtlasTextures": [{"m_FileID": 1, "m_PathID": 82}],
         }));
         let job = reset_job(PathBuf::from("new.ttf"));
-        let error = reset_tree(Some(&game), &job, &FontAtlases::new(), &options())
+        let error = reset_tree(Some(&game), &job, &FontAtlases::new(), &Options::default())
             .err()
             .unwrap();
         assert!(error.to_string().contains("another game file"));
@@ -1371,7 +1402,7 @@ mod tests {
         }));
         let job = reset_job(fixture("make-font-AB.ttf"));
         let (cleared, atlas_id) =
-            reset_tree(Some(&game), &job, &FontAtlases::new(), &options()).unwrap();
+            reset_tree(Some(&game), &job, &FontAtlases::new(), &Options::default()).unwrap();
         assert_eq!(
             (
                 &cleared["m_CharacterTable"],

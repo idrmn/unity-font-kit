@@ -2,25 +2,54 @@
 
 use std::collections::HashSet;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use indexmap::IndexMap;
+use skrifa::GlyphId;
 use skrifa::raw::tables::gpos::{
     PairPos, PairPosFormat1, PairPosFormat2, PositionSubtables, ValueRecord,
 };
 use skrifa::raw::tables::kern::SubtableKind;
 use skrifa::raw::{FontRef, TableProvider};
 
-/// XPlacement, YPlacement, XAdvance, YAdvance in font units.
-pub type Shift = [i32; 4];
-pub type Pair = (u32, u32);
+/// In font units as read from the font, in pixels once scaled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shift<T> {
+    pub x_placement: T,
+    pub y_placement: T,
+    pub x_advance: T,
+    pub y_advance: T,
+}
+
+impl Shift<i32> {
+    fn scaled(self, scale: f64) -> Shift<f64> {
+        let scale = |part: i32| f64::from(part) * scale;
+        Shift {
+            x_placement: scale(self.x_placement),
+            y_placement: scale(self.y_placement),
+            x_advance: scale(self.x_advance),
+            y_advance: scale(self.y_advance),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlyphPair {
+    pub first: u32,
+    pub second: u32,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Adjustment {
-    pub first: Shift,
-    pub second: Shift,
+    pub first: Shift<i32>,
+    pub second: Shift<i32>,
 }
 
-const NO_SHIFT: Shift = [0; 4];
+const NO_SHIFT: Shift<i32> = Shift {
+    x_placement: 0,
+    y_placement: 0,
+    x_advance: 0,
+    y_advance: 0,
+};
 const NO_ADJUSTMENT: Adjustment = Adjustment {
     first: NO_SHIFT,
     second: NO_SHIFT,
@@ -31,17 +60,18 @@ const NO_ADJUSTMENT: Adjustment = Adjustment {
 pub struct PairRecord {
     pub first: u32,
     pub second: u32,
-    pub first_shift: [f64; 4],
-    pub second_shift: [f64; 4],
+    pub first_shift: Shift<f64>,
+    pub second_shift: Shift<f64>,
 }
 
-type Pairs = IndexMap<Pair, Adjustment>;
+type Pairs = IndexMap<GlyphPair, Adjustment>;
 
+#[must_use]
 pub fn is_before_unity6(unity_version: &str) -> bool {
-    let major = unity_version
+    let major: Option<u32> = unity_version
         .split('.')
         .next()
-        .and_then(|part| part.parse::<u32>().ok());
+        .and_then(|part| part.parse().ok());
     major.is_some_and(|major| major < 6000)
 }
 
@@ -51,7 +81,7 @@ pub fn read_kerning(
     point_size: f64,
     unity_version: &str,
 ) -> Result<Vec<PairRecord>> {
-    let font = FontRef::new(font).map_err(|error| anyhow!("cannot read font: {error}"))?;
+    let font = FontRef::new(font).context("cannot read font")?;
     let scale = point_size / f64::from(font.head().context("no head table")?.units_per_em());
     let glyph_count = u32::from(font.maxp().context("no maxp table")?.num_glyphs());
     let kern = read_kern_pairs(&font);
@@ -69,10 +99,13 @@ pub fn read_kerning(
     };
     Ok(pairs
         .into_iter()
-        .filter(|((a, b), _)| {
-            *a < glyph_count && *b < glyph_count && placed.contains(a) && placed.contains(b)
+        .filter(|(GlyphPair { first, second }, _)| {
+            *first < glyph_count
+                && *second < glyph_count
+                && placed.contains(first)
+                && placed.contains(second)
         })
-        .map(|((first, second), adjustment)| describe_pair(first, second, adjustment, scale))
+        .map(|(pair, adjustment)| describe_pair(pair, adjustment, scale))
         .collect())
 }
 
@@ -94,9 +127,15 @@ fn read_kern_pairs(font: &FontRef) -> Pairs {
         for pair in table.pairs() {
             let value = i32::from(pair.value());
             if value != 0 {
-                let shift = [0, 0, value, 0];
+                let shift = Shift {
+                    x_advance: value,
+                    ..NO_SHIFT
+                };
                 pairs.insert(
-                    (pair.left().to_u32(), pair.right().to_u32()),
+                    GlyphPair {
+                        first: pair.left().to_u32(),
+                        second: pair.right().to_u32(),
+                    },
                     Adjustment {
                         first: shift,
                         second: NO_SHIFT,
@@ -144,10 +183,10 @@ fn read_glyph_pairs(table: &PairPosFormat1) -> Result<Pairs> {
             let record = record?;
             let adjustment = read_adjustment(record.value_record1(), record.value_record2());
             found.insert(
-                (
-                    u32::from(first.to_u16()),
-                    u32::from(record.second_glyph().to_u16()),
-                ),
+                GlyphPair {
+                    first: u32::from(first.to_u16()),
+                    second: u32::from(record.second_glyph().to_u16()),
+                },
                 adjustment,
             );
         }
@@ -162,7 +201,7 @@ fn read_class_pairs(table: &PairPosFormat2, seconds: &[u32]) -> Result<Pairs> {
     let mut by_class: IndexMap<u16, Vec<u32>> = IndexMap::new();
     for &glyph in seconds {
         by_class
-            .entry(class2.get(skrifa::GlyphId::new(glyph)))
+            .entry(class2.get(GlyphId::new(glyph)))
             .or_default()
             .push(glyph);
     }
@@ -180,7 +219,11 @@ fn read_class_pairs(table: &PairPosFormat2, seconds: &[u32]) -> Result<Pairs> {
                 continue;
             }
             for &second in glyphs {
-                pairs.insert((u32::from(first.to_u16()), second), adjustment);
+                let pair = GlyphPair {
+                    first: u32::from(first.to_u16()),
+                    second,
+                };
+                pairs.insert(pair, adjustment);
             }
         }
     }
@@ -194,23 +237,22 @@ fn read_adjustment(first: &ValueRecord, second: &ValueRecord) -> Adjustment {
     }
 }
 
-fn read_shift(value: &ValueRecord) -> Shift {
-    [
-        value.x_placement(),
-        value.y_placement(),
-        value.x_advance(),
-        value.y_advance(),
-    ]
-    .map(|part| i32::from(part.unwrap_or(0)))
+fn read_shift(value: &ValueRecord) -> Shift<i32> {
+    let read = |part: Option<i16>| i32::from(part.unwrap_or(0));
+    Shift {
+        x_placement: read(value.x_placement()),
+        y_placement: read(value.y_placement()),
+        x_advance: read(value.x_advance()),
+        y_advance: read(value.y_advance()),
+    }
 }
 
-fn describe_pair(first: u32, second: u32, adjustment: Adjustment, scale: f64) -> PairRecord {
-    let scaled = |shift: Shift| shift.map(|part| f64::from(part) * scale);
+fn describe_pair(pair: GlyphPair, adjustment: Adjustment, scale: f64) -> PairRecord {
     PairRecord {
-        first,
-        second,
-        first_shift: scaled(adjustment.first),
-        second_shift: scaled(adjustment.second),
+        first: pair.first,
+        second: pair.second,
+        first_shift: adjustment.first.scaled(scale),
+        second_shift: adjustment.second.scaled(scale),
     }
 }
 
@@ -232,7 +274,7 @@ mod tests {
         )
         .unwrap();
         let second = pairs[0].second_shift;
-        assert_eq!((second[1], second[2]), (0.4, -2.0));
+        assert_eq!((second.y_placement, second.x_advance), (0.4, -2.0));
     }
 
     #[test]
@@ -244,7 +286,10 @@ mod tests {
             "6000.3.12f1",
         )
         .unwrap();
-        let firsts: Vec<(u32, f64)> = pairs.iter().map(|p| (p.first, p.first_shift[2])).collect();
+        let firsts: Vec<(u32, f64)> = pairs
+            .iter()
+            .map(|p| (p.first, p.first_shift.x_advance))
+            .collect();
         assert_eq!(firsts, [(1, -2.0), (1, -2.0)]);
     }
 }

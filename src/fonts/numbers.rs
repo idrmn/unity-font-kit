@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
-use kurbo::{Affine, BezPath, CubicBez, Point, Rect, Shape};
+use kurbo::{Affine, BezPath, CubicBez, Point, Rect};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::prelude::{LocationRef, Size};
-use skrifa::raw::TableProvider;
 use skrifa::{FontRef, MetadataProvider};
 use write_fonts::FontBuilder;
 use write_fonts::tables::cmap::Cmap;
@@ -60,6 +59,11 @@ const MARKED: [(u32, u32); 5] = [
     (0x2100, 0x214F),
 ];
 
+struct Outline {
+    path: BezPath,
+    width: f64,
+}
+
 struct Drawn {
     glyph: SimpleGlyph,
     advance: u16,
@@ -69,7 +73,11 @@ struct Drawn {
 pub fn make_number_font(number: usize) -> Result<Vec<u8>> {
     let letters = FontRef::new(LETTERS).context("Cannot read the letters font")?;
     let mark = draw_number(number);
-    let only_number = place_glyph(&BezPath::new(), 0., &mark)?;
+    let nothing = Outline {
+        path: BezPath::new(),
+        width: 0.,
+    };
+    let only_number = place_glyph(&nothing, &mark)?;
     let mut glyphs = vec![only_number];
     let mut by_source: HashMap<skrifa::GlyphId, u32> = HashMap::new();
     let mut mappings = Vec::new();
@@ -85,8 +93,8 @@ pub fn make_number_font(number: usize) -> Result<Vec<u8>> {
         let id = match by_source.get(&source) {
             Some(id) => *id,
             None => {
-                let (outline, width) = read_letter(&letters, source)?;
-                glyphs.push(place_glyph(&outline, width, &mark)?);
+                let letter = read_letter(&letters, source)?;
+                glyphs.push(place_glyph(&letter, &mark)?);
                 let id = glyphs.len() as u32 + 1;
                 by_source.insert(source, id);
                 id
@@ -105,7 +113,9 @@ fn marked_characters() -> impl Iterator<Item = char> {
         .chain([' '])
 }
 
-fn read_letter(font: &FontRef, glyph: skrifa::GlyphId) -> Result<(BezPath, f64)> {
+fn read_letter(font: &FontRef, glyph: skrifa::GlyphId) -> Result<Outline> {
+    use skrifa::raw::TableProvider;
+
     let units = f64::from(font.head()?.units_per_em());
     let scale = LETTER_SCALE * f64::from(UNITS) / units;
     let width = font
@@ -119,15 +129,17 @@ fn read_letter(font: &FontRef, glyph: skrifa::GlyphId) -> Result<(BezPath, f64)>
             .draw(settings, &mut pen)
             .map_err(|error| anyhow!("Cannot draw a letter: {error}"))?;
     }
-    Ok((Affine::scale(scale) * pen.path, width * scale))
+    Ok(Outline {
+        path: Affine::scale(scale) * pen.path,
+        width: width * scale,
+    })
 }
 
 /// The number sits over the letter, both centered in an advance wide enough for either.
-fn place_glyph(letter: &BezPath, letter_width: f64, mark: &(BezPath, f64)) -> Result<Drawn> {
-    let (number, number_width) = mark;
-    let advance = letter_width.max(number_width + 2. * SIDE);
-    let mut path = Affine::translate(((advance - letter_width) / 2., 0.)) * letter.clone();
-    path.extend(Affine::translate(((advance - number_width) / 2., 0.)) * number.clone());
+fn place_glyph(letter: &Outline, mark: &Outline) -> Result<Drawn> {
+    let advance = letter.width.max(mark.width + 2. * SIDE);
+    let mut path = Affine::translate(((advance - letter.width) / 2., 0.)) * letter.path.clone();
+    path.extend(Affine::translate(((advance - mark.width) / 2., 0.)) * mark.path.clone());
     let glyph = SimpleGlyph::from_bezpath(&path)
         .map_err(|error| anyhow!("Cannot draw the number: {error:?}"))?;
     Ok(Drawn {
@@ -226,7 +238,9 @@ fn build_font(number: usize, drawn: &[Drawn], mappings: Vec<(char, GlyphId)>) ->
     Ok(font.build())
 }
 
-fn draw_number(number: usize) -> (BezPath, f64) {
+fn draw_number(number: usize) -> Outline {
+    use kurbo::Shape;
+
     let digits: Vec<usize> = number
         .to_string()
         .bytes()
@@ -240,7 +254,7 @@ fn draw_number(number: usize) -> (BezPath, f64) {
         }
     }
     let width = digits.len() as f64 * (DIGIT_WIDTH + GAP) - GAP;
-    (path, width)
+    Outline { path, width }
 }
 
 fn lit_segments(digit: usize, left: f64) -> Vec<Rect> {

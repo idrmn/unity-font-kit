@@ -6,14 +6,22 @@ use crate::fonts::charsets::{self, Charset};
 use crate::work::plan::{self, Plan};
 use crate::work::project::{self, Project};
 
-use super::{GameView, Letters};
+use super::GameView;
 
 pub const PRESETS: [&str; 2] = charsets::LANGUAGES;
 const CUSTOM: &str = "custom";
 pub(crate) const LETTERS_FILE: &str = "letters.txt";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Letters {
+    pub preset: String,
+    pub letters: String,
+    pub marks: String,
+}
+
 /// People type every character into one field; letters (and what a language counts as one, like ’)
 /// must be in a font, everything else (₴, «», №) is a mark that only gets noted.
+#[must_use]
 pub fn split_text(text: &str, preset: &str) -> Letters {
     let language_letters: String = PRESETS
         .iter()
@@ -29,6 +37,7 @@ pub fn split_text(text: &str, preset: &str) -> Letters {
     }
 }
 
+#[must_use]
 pub fn join_text(letters: &Letters) -> String {
     format!("{}{}", letters.letters, letters.marks)
 }
@@ -111,7 +120,7 @@ pub(crate) fn store_letters(work: &Project, charset: &Charset) -> Result<Option<
 }
 
 #[cfg(test)]
-mod split_tests {
+mod tests {
     use super::*;
 
     #[test]

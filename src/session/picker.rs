@@ -8,15 +8,27 @@ use crate::fonts::charsets::Charset;
 use crate::fonts::font_file::{self, FontCheck};
 use crate::work::project;
 
-use super::letters::to_charset;
-use super::state::open_work;
-use super::{FontOption, GameView, Letters, Origin};
+use super::{GameView, Letters, letters, state};
 
 const ADDED_FONTS: &str = "fonts";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    Game,
+    Added,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontOption {
+    pub label: String,
+    pub path: PathBuf,
+    pub origin: Origin,
+    pub missing: String,
+}
+
 pub fn list_options(view: &GameView, letters: &Letters) -> Result<Vec<FontOption>> {
-    let charset = to_charset(letters)?;
-    let work = open_work(&view.home, &view.record)?;
+    let charset = letters::to_charset(letters)?;
+    let work = state::open_work(&view.home, &view.record)?;
     let game = list_game_fonts(&work.fonts, &charset)?;
     let added = list_fonts(&view.home.join(ADDED_FONTS), &charset, Origin::Added)?;
     Ok([game, added].concat())
@@ -28,7 +40,7 @@ pub fn add_font_file(path: &Path, letters: &Letters) -> Result<FontOption> {
 
 pub(crate) fn add_font_file_in(home: &Path, path: &Path, letters: &Letters) -> Result<FontOption> {
     let data = std::fs::read(path).with_context(|| format!("Cannot read {}", path.display()))?;
-    let checked = font_file::check(&data, &to_charset(letters)?)
+    let checked = font_file::check(&data, &letters::to_charset(letters)?)
         .with_context(|| format!("{} is not a font ufk can use", path.display()))?;
     let folder = home.join(ADDED_FONTS);
     std::fs::create_dir_all(&folder)
@@ -111,7 +123,7 @@ mod tests {
             unity_version: "2020.3.12f1".to_string(),
             backend: crate::session::Backend::Mono,
         };
-        let work = open_work(home.path(), &record).unwrap();
+        let work = state::open_work(home.path(), &record).unwrap();
         std::fs::create_dir_all(work.fonts.join("sub")).unwrap();
         let abc = std::fs::read(format!("{DATA}/make-font-ABC.ttf")).unwrap();
         let ab = std::fs::read(format!("{DATA}/make-font-AB.ttf")).unwrap();

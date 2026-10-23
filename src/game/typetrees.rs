@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,8 +17,8 @@ pub struct Generator {
     version: UnityVersion,
 }
 
-impl std::fmt::Debug for Generator {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Generator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Generator").finish_non_exhaustive()
     }
 }
@@ -59,6 +60,7 @@ pub fn generate_script_tree(
     Ok(prepend_children(script, &base))
 }
 
+#[must_use]
 pub fn describe_raw_reading(game: &Game) -> String {
     let source = match game.backend {
         Backend::Mono => "DLLs",
@@ -67,6 +69,7 @@ pub fn describe_raw_reading(game: &Game) -> String {
     format!("no typetree in the game's {source}")
 }
 
+#[must_use]
 pub fn has_dlls(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries.flatten().any(|entry| {

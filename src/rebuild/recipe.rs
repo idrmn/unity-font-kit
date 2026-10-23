@@ -1,13 +1,14 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
 use crate::fonts::charsets::{self, Charset};
 use crate::game::folder;
-use crate::game::scan::TmpFont;
+use crate::game::scan::{AtlasSize, TmpFont};
+use crate::game::tmp_schema::Tree;
 
 /// TMP before 1.4 did not store its render mode; SDFAA is a guess the recipe file can override.
 pub const GUESSED_RENDER_MODE: u32 = 4165;
@@ -51,7 +52,7 @@ pub fn load(path: &Path) -> Result<Recipe> {
     let name = path
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    let text = crate::fonts::charsets::read_text(path)?;
+    let text = charsets::read_text(path)?;
     let data: Value = serde_json::from_str(&text)?;
     let Some(object) = data.as_object() else {
         bail!("{name} is not a ufk recipe");
@@ -75,7 +76,7 @@ pub fn build(
     charset: &Charset,
     unity_version: &str,
 ) -> Result<Recipe> {
-    let (Some(point_size), Some((width, height)), Some(padding)) =
+    let (Some(point_size), Some(AtlasSize { width, height }), Some(padding)) =
         (&font.point_size, font.atlas, font.padding)
     else {
         bail!("{}: ufk cannot read the settings of this font", font.name);
@@ -97,8 +98,8 @@ pub fn build(
     Ok(Recipe {
         font: font.name.clone(),
         file: relative_posix(&font.file, data_dir)?,
-        serialized_file: font.reference.0.clone(),
-        path_id: font.reference.1,
+        serialized_file: font.reference.serialized_file.clone(),
+        path_id: font.reference.path_id,
         family: font.family.clone().unwrap_or_default(),
         point_size: round_half_even(point_size)?,
         padding: convert(padding, "padding", &font.name)?,
@@ -141,14 +142,20 @@ fn round_half_even(number: &Number) -> Result<i64> {
 }
 
 fn convert<T: TryFrom<i64>>(value: i64, field: &str, font: &str) -> Result<T> {
-    T::try_from(value).map_err(|_| anyhow::anyhow!("{font}: {field} {value} is out of range"))
+    T::try_from(value).map_err(|_| anyhow!("{font}: {field} {value} is out of range"))
 }
 
 pub fn to_json(recipe: &Recipe) -> Result<String> {
     Ok(serde_json::to_string_pretty(recipe)?)
 }
 
-pub fn artifact_paths(recipe_path: &Path) -> Result<(PathBuf, PathBuf)> {
+#[derive(Debug, PartialEq, Eq)]
+pub struct Artifacts {
+    pub json: PathBuf,
+    pub png: PathBuf,
+}
+
+pub fn artifact_paths(recipe_path: &Path) -> Result<Artifacts> {
     let name = recipe_path
         .file_name()
         .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
@@ -156,14 +163,14 @@ pub fn artifact_paths(recipe_path: &Path) -> Result<(PathBuf, PathBuf)> {
         bail!("A recipe file name ends with {SUFFIX}, got {name}");
     };
     let parent = recipe_path.parent().unwrap_or(Path::new(""));
-    Ok((
-        parent.join(format!("{stem}.json")),
-        parent.join(format!("{stem}.png")),
-    ))
+    Ok(Artifacts {
+        json: parent.join(format!("{stem}.json")),
+        png: parent.join(format!("{stem}.png")),
+    })
 }
 
-pub fn load_baked(recipe_path: &Path) -> Result<serde_json::Map<String, Value>> {
-    let (baked_json, _) = artifact_paths(recipe_path)?;
+pub fn load_baked(recipe_path: &Path) -> Result<Tree> {
+    let baked_json = artifact_paths(recipe_path)?.json;
     if !baked_json.exists() {
         let name = baked_json.file_name().unwrap_or_default().to_string_lossy();
         bail!("no {name}, apply the changes first");
@@ -187,7 +194,7 @@ mod tests {
     fn font(file: &str, chars: &str, path_id: i64) -> TmpFont {
         TmpFont {
             file: Path::new(DATA).join(file),
-            reference: ("CAB-1".to_string(), path_id),
+            reference: ("CAB-1".to_string(), path_id).into(),
             name: "Body SDF".to_string(),
             codepoints: chars.chars().map(u32::from).collect(),
             fallbacks: Vec::new(),
@@ -207,7 +214,7 @@ mod tests {
         TmpFont {
             point_size: Number::from_f64(30.0),
             padding: Some(3),
-            atlas: Some((512, 512)),
+            atlas: Some((512, 512).into()),
             render_mode: Some(render_mode),
             dynamic,
             ..base
@@ -245,10 +252,10 @@ mod tests {
     fn artifacts_take_the_recipe_file_name() {
         assert_eq!(
             artifact_paths(Path::new("out/Body.v2.recipe.json")).unwrap(),
-            (
-                PathBuf::from("out/Body.v2.json"),
-                PathBuf::from("out/Body.v2.png")
-            )
+            Artifacts {
+                json: PathBuf::from("out/Body.v2.json"),
+                png: PathBuf::from("out/Body.v2.png"),
+            }
         );
     }
 

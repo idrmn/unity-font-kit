@@ -1,13 +1,17 @@
 //! TMP 1.4+ stores m_CharacterTable and m_GlyphTable; older TMP stores m_glyphInfoList.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
 pub type Tree = Map<String, Value>;
 
+#[must_use]
 pub fn is_new_schema(tree: &Tree) -> bool {
     tree.contains_key("m_CharacterTable")
 }
 
+#[must_use]
 pub fn read_atlas_refs(tree: &Tree) -> Vec<Value> {
     if is_new_schema(tree) {
         return list(tree, "m_AtlasTextures");
@@ -18,6 +22,7 @@ pub fn read_atlas_refs(tree: &Tree) -> Vec<Value> {
     }
 }
 
+#[must_use]
 pub fn to_glyph_info(codepoint: &Value, glyph: &Value, atlas_height: i64) -> Value {
     let (rect, metrics) = (&glyph["m_GlyphRect"], &glyph["m_Metrics"]);
     let rect_height = number(&rect["m_Height"]);
@@ -39,11 +44,12 @@ pub fn to_glyph_info(codepoint: &Value, glyph: &Value, atlas_height: i64) -> Val
     })
 }
 
+#[must_use]
 pub fn to_glyph_infos(baked: &Tree) -> Vec<Value> {
     let atlas_height = baked
         .get("atlas_height")
         .map_or(0, |value| number(value) as i64);
-    let glyphs: std::collections::HashMap<i64, &Value> = list_ref(baked, "glyphs")
+    let glyphs: HashMap<i64, &Value> = list_ref(baked, "glyphs")
         .iter()
         .map(|glyph| (number(&glyph["m_Index"]) as i64, glyph))
         .collect();
@@ -56,6 +62,7 @@ pub fn to_glyph_infos(baked: &Tree) -> Vec<Value> {
         .collect()
 }
 
+#[must_use]
 pub fn to_font_info(face: &Value, baked: &Tree) -> Value {
     let get = |key: &str, default: Value| face.get(key).cloned().unwrap_or(default);
     json!({
@@ -83,6 +90,7 @@ pub fn to_font_info(face: &Value, baked: &Tree) -> Value {
     })
 }
 
+#[must_use]
 pub fn number(value: &Value) -> f64 {
     value.as_f64().unwrap_or(0.0)
 }

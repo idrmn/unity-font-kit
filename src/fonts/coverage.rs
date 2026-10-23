@@ -22,6 +22,7 @@ pub struct LegacyCoverage {
     pub texts: usize,
 }
 
+#[must_use]
 pub fn check_tmp_fonts(result: &ScanResult, charset: &Charset) -> Vec<TmpCoverage> {
     let index: HashMap<&Ref, &TmpFont> = result
         .tmp
@@ -82,7 +83,7 @@ fn check_tmp_font(
         missing_letters: charsets::find_missing(&own, &charset.letters),
         missing_typography: charsets::find_missing(&own, &charset.typography),
         missing_letters_with_fallbacks: charsets::find_missing(&all, &charset.letters),
-        chain: chain[1..].iter().map(|f| f.name.clone()).collect(),
+        chain: chain.iter().skip(1).map(|f| f.name.clone()).collect(),
         texts: 0,
     }
 }
@@ -109,6 +110,7 @@ fn collect_fallback_chain<'a>(
     order
 }
 
+#[must_use]
 pub fn check_legacy_fonts(result: &ScanResult, charset: &Charset) -> Vec<LegacyCoverage> {
     let texts = count_texts(result);
     result
@@ -148,12 +150,12 @@ mod tests {
     fn font(path_id: i64, chars: &str, fallbacks: &[i64]) -> TmpFont {
         TmpFont {
             file: PathBuf::from("resources.assets"),
-            reference: ("resources.assets".to_string(), path_id),
+            reference: ("resources.assets".to_string(), path_id).into(),
             name: format!("font{path_id}"),
             codepoints: chars.chars().map(u32::from).collect(),
             fallbacks: fallbacks
                 .iter()
-                .map(|f| ("resources.assets".to_string(), *f))
+                .map(|f| ("resources.assets".to_string(), *f).into())
                 .collect(),
             family: None,
             point_size: None,
@@ -179,7 +181,7 @@ mod tests {
             ],
             settings: vec![TmpSettings {
                 file: PathBuf::from("resources.assets"),
-                default_font: Some(("resources.assets".to_string(), 3)),
+                default_font: Some(("resources.assets".to_string(), 3).into()),
                 fallbacks: Vec::new(),
             }],
             ..ScanResult::default()

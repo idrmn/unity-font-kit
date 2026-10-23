@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Result, anyhow, bail};
-use skrifa::outline::{DrawSettings, OutlinePen};
+use skrifa::GlyphId;
+use skrifa::outline::{DrawSettings, OutlineGlyphCollection, OutlinePen};
 use skrifa::prelude::{LocationRef, Size};
 use skrifa::raw::tables::cmap::{Cmap4, CmapSubtable};
-use skrifa::raw::{FileRef, FontRef, TableProvider};
-use skrifa::{GlyphId, MetadataProvider};
+use skrifa::raw::tables::name::NameRecord;
+use skrifa::raw::{FileRef, FontData, FontRef, TableProvider};
 
 use super::charsets::{self, Charset};
 
@@ -38,10 +39,12 @@ pub struct FontCheck {
 
 impl FontCheck {
     /// Letters the text cannot show: absent, drawn empty, or drawn as another letter.
+    #[must_use]
     pub fn unusable_letters(&self) -> String {
         join_unique(&[&self.missing_letters, &self.empty, &self.aliased])
     }
 
+    #[must_use]
     pub fn unusable(&self) -> String {
         join_unique(&[
             &self.missing_letters,
@@ -83,18 +86,18 @@ pub fn load_cmap(data: &[u8]) -> Result<Cmap> {
     best_cmap(&open(data)?).map_err(unusable)
 }
 
-fn unusable(error: anyhow::Error) -> anyhow::Error {
+pub fn unusable(error: anyhow::Error) -> anyhow::Error {
     anyhow!("Not a usable TrueType/OpenType font: {error}")
 }
 
 /// A font collection is read by its first font.
-fn open(data: &[u8]) -> Result<FontRef<'_>> {
+pub fn open(data: &[u8]) -> Result<FontRef<'_>> {
     let font = match FileRef::new(data) {
         Ok(FileRef::Font(font)) => Ok(font),
         Ok(FileRef::Collection(collection)) => collection.get(0),
         Err(error) => Err(error),
     };
-    font.map_err(|error| anyhow!("Not a usable TrueType/OpenType font: {error}"))
+    font.map_err(|error| unusable(error.into()))
 }
 
 fn best_cmap(font: &FontRef) -> Result<Cmap> {
@@ -175,7 +178,7 @@ fn debug_name(font: &FontRef, name_id: u16) -> Option<String> {
             continue;
         }
         let (platform, language) = (record.platform_id(), record.language_id());
-        let Some(text) = decode_name(platform, record.encoding_id(), language, record, data) else {
+        let Some(text) = decode_name(record, data) else {
             continue;
         };
         if (platform, language) == (3, 0x409) {
@@ -196,14 +199,10 @@ fn debug_name(font: &FontRef, name_id: u16) -> Option<String> {
         .find(|text| !text.is_empty())
 }
 
-fn decode_name(
-    platform: u16,
-    encoding: u16,
-    language: u16,
-    record: &skrifa::raw::tables::name::NameRecord,
-    data: skrifa::raw::FontData,
-) -> Option<String> {
+fn decode_name(record: &NameRecord, data: FontData) -> Option<String> {
     let bytes = record.string(data).ok()?;
+    let (platform, encoding) = (record.platform_id(), record.encoding_id());
+    let language = record.language_id();
     let is_utf16 = platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10));
     let is_mac_roman = platform == 1 && encoding == 0 && language == 0;
     if !is_utf16 && !is_mac_roman {
@@ -215,19 +214,24 @@ fn decode_name(
 }
 
 fn find_empty(font: &FontRef, cmap: &Cmap, wanted: &str) -> String {
+    use skrifa::MetadataProvider;
+
     let outlines = font.outline_glyphs();
     wanted
         .chars()
         .filter(|ch| {
-            cmap.get(&u32::from(*ch)).is_some_and(|glyph| {
-                outlines.get(*glyph).is_none_or(|outline| {
-                    let mut pen = AnyPoint::default();
-                    let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
-                    outline.draw(settings, &mut pen).is_err() || !pen.drawn
-                })
-            })
+            cmap.get(&u32::from(*ch))
+                .is_some_and(|glyph| draws_nothing(&outlines, *glyph))
         })
         .collect()
+}
+
+fn draws_nothing(outlines: &OutlineGlyphCollection, glyph: GlyphId) -> bool {
+    outlines.get(glyph).is_none_or(|outline| {
+        let mut pen = AnyPoint::default();
+        let settings = DrawSettings::unhinted(Size::unscaled(), LocationRef::default());
+        outline.draw(settings, &mut pen).is_err() || !pen.drawn
+    })
 }
 
 fn find_aliases(cmap: &Cmap, pairs: &[(char, char)]) -> String {

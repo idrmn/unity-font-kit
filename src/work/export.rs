@@ -1,10 +1,11 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
+use tar::Archive;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, System, ZipArchive, ZipWriter};
 
@@ -204,7 +205,7 @@ fn read_member(archive: &Path, binary: &str) -> Result<Vec<u8>> {
 }
 
 fn read_tar_member(bytes: &[u8], member: &str) -> Result<Option<Vec<u8>>> {
-    let mut archive = tar::Archive::new(GzDecoder::new(bytes));
+    let mut archive = Archive::new(GzDecoder::new(bytes));
     for entry in archive.entries()? {
         let mut entry = entry?;
         if entry.path()?.to_string_lossy() != member {
@@ -233,8 +234,9 @@ fn unpack_encoder(tools: &[(&Xdelta, PathBuf)], host: &str, folder: &Path) -> Re
 
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<()> {
+    use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::set_permissions(path, Permissions::from_mode(0o755))?;
     Ok(())
 }
 
@@ -279,7 +281,9 @@ fn format_manifest(files: &[String], hashes: &[String], patched: &Path) -> Resul
 }
 
 /// Players' backups take this name, so it must stay the same for a file in every later patch.
+#[must_use]
 pub fn name_delta(file: &str) -> String {
+    use sha2::Digest;
     let digest: String = Sha256::digest(file.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -400,6 +404,7 @@ fn write_zip(
 }
 
 fn encode_zip(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
+    use std::io::Write;
     let date = DateTime::from_date_and_time(2020, 1, 1, 0, 0, 0)?;
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     for (name, data) in entries {

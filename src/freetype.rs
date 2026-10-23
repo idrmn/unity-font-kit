@@ -75,7 +75,7 @@ fn check(error: ft::FT_Error, what: &str) -> Result<()> {
 }
 
 impl Library {
-    pub fn new() -> Result<Library> {
+    pub fn try_new() -> Result<Library> {
         let mut raw = ptr::null_mut();
         // SAFETY: FT_Init_FreeType writes a fresh library handle into `raw` on success.
         check(unsafe { ft::FT_Init_FreeType(&mut raw) }, "init")?;
@@ -84,22 +84,29 @@ impl Library {
 
     /// TrueType hinting: 35 matches Unity before 6, 40 matches Unity 6.
     pub fn set_interpreter_version(&self, version: u32) -> Result<()> {
-        self.set_property(c"truetype", c"interpreter-version", &version)
-    }
-
-    pub fn set_sdf_spread(&self, spread: i32) -> Result<()> {
-        self.set_property(c"bsdf", c"spread", &spread)
-    }
-
-    fn set_property<T>(&self, module: &CStr, name: &CStr, value: &T) -> Result<()> {
-        // SAFETY: the library is alive, the names are NUL-terminated, and FreeType reads `value`
-        // as the type the property expects (FT_UInt for interpreter-version, FT_Int for spread).
+        let value: ft::FT_UInt = version;
+        // SAFETY: the library is alive, the names are NUL-terminated, and interpreter-version
+        // reads an FT_UInt.
         let error = unsafe {
             ft::FT_Property_Set(
                 self.raw,
-                module.as_ptr(),
-                name.as_ptr(),
-                ptr::from_ref(value).cast(),
+                c"truetype".as_ptr(),
+                c"interpreter-version".as_ptr(),
+                ptr::from_ref(&value).cast(),
+            )
+        };
+        check(error, "property set")
+    }
+
+    pub fn set_sdf_spread(&self, spread: i32) -> Result<()> {
+        let value: ft::FT_Int = spread;
+        // SAFETY: the library is alive, the names are NUL-terminated, and spread reads an FT_Int.
+        let error = unsafe {
+            ft::FT_Property_Set(
+                self.raw,
+                c"bsdf".as_ptr(),
+                c"spread".as_ptr(),
+                ptr::from_ref(&value).cast(),
             )
         };
         check(error, "property set")
@@ -114,7 +121,7 @@ impl Drop for Library {
 }
 
 impl<'a> Face<'a> {
-    pub fn from_bytes(library: &'a Library, bytes: &'a [u8]) -> Result<Face<'a>> {
+    pub fn try_new(library: &'a Library, bytes: &'a [u8]) -> Result<Face<'a>> {
         let mut raw = ptr::null_mut();
         let size = ft::FT_Long::try_from(bytes.len())?;
         // SAFETY: FreeType keeps a pointer to `bytes`; the lifetime ties them to the face.
@@ -138,6 +145,7 @@ impl<'a> Face<'a> {
         )
     }
 
+    #[must_use]
     pub fn fields(&self) -> FaceFields {
         // SAFETY: the face is alive; FreeType keeps the name strings NUL-terminated or null.
         unsafe {
@@ -155,6 +163,7 @@ impl<'a> Face<'a> {
         }
     }
 
+    #[must_use]
     pub fn char_index(&self, codepoint: u32) -> u32 {
         // SAFETY: the face is alive.
         unsafe { ft::FT_Get_Char_Index(self.raw, ft::FT_ULong::from(codepoint)) }
@@ -178,6 +187,7 @@ impl<'a> Face<'a> {
 
     // FT_Pos is a C long: 64-bit on Linux, 32-bit on Windows.
     #[allow(clippy::useless_conversion)]
+    #[must_use]
     pub fn glyph(&self) -> Glyph {
         // SAFETY: the slot is owned by the live face; the bitmap buffer holds rows * |pitch| bytes.
         unsafe {

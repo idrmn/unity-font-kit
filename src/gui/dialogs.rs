@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use freya::prelude::{
     Alignment, Button, Checkbox, ChildrenExt, Color, ContainerExt, ContainerSizeExt,
@@ -10,8 +10,10 @@ use freya::prelude::{
 use super::icons;
 use super::text_area::TextArea;
 use super::theme::{self, ACCENT_TINT, CAPTION, OK, SECONDARY, TERTIARY, WARN};
-use super::{Dialog, Ui, sidebar, tasks};
-use crate::session::{self, FontKey, FontOption, GameStatus, Origin};
+use super::ui::{Dialog, Pick, Ui};
+use super::{game, sidebar, tasks};
+use crate::session::{self, FontKey, FontOption, GameStatus, Origin, ScanDepth};
+use crate::work::project;
 
 pub fn view(ui: Ui) -> impl IntoElement {
     let dialog = ui.dialog.read().clone();
@@ -99,7 +101,7 @@ fn mark_body(ui: Ui) -> Rect {
         .flat_map(|plan| plan.fonts.iter())
         .map(FontKey::of)
         .collect();
-    let rows = game
+    let rows: Vec<Element> = game
         .plan
         .iter()
         .flat_map(|plan| plan.fonts.iter())
@@ -116,7 +118,7 @@ fn mark_body(ui: Ui) -> Rect {
                 .on_press(move |_| {
                     let mut next = marked.read().clone();
                     if selected {
-                        next.retain(|k| k != &key);
+                        next.retain(|kept| kept != &key);
                     } else {
                         next.push(key.clone());
                     }
@@ -138,7 +140,7 @@ fn mark_body(ui: Ui) -> Rect {
                 }))
                 .into()
         })
-        .collect::<Vec<Element>>();
+        .collect();
     rect()
         .width(Size::fill())
         .spacing(10.)
@@ -178,7 +180,7 @@ fn mark_buttons(ui: Ui) -> Rect {
             ready,
             theme::primary("Generate").on_press(move |_| {
                 dialog.set(Dialog::None);
-                super::game::mark(ui, keys.clone());
+                game::mark(ui, keys.clone());
             }),
         ))
 }
@@ -231,8 +233,9 @@ pub fn open_picker(ui: Ui, key: FontKey) {
         .map(|chosen| chosen.path.clone());
     let (mut dialog, mut options, mut picked) = (ui.dialog, ui.options, ui.picked);
     let letters = ui.current_letters();
+    let start = current.clone().map_or(Pick::Original, Pick::File);
     dialog.set(Dialog::Picker(key.clone()));
-    picked.set(Some(current.clone()));
+    picked.set(start.clone());
     options.set(None);
     spawn(async move {
         let wanted = current.clone();
@@ -246,8 +249,8 @@ pub fn open_picker(ui: Ui, key: FontKey) {
         if *dialog.peek() != Dialog::Picker(key) {
             return;
         }
-        if let Some(same) = matching.filter(|_| *picked.peek() == Some(current)) {
-            picked.set(Some(Some(same)));
+        if let Some(same) = matching.filter(|_| *picked.peek() == start) {
+            picked.set(Pick::File(same));
         }
         let added: Vec<FontOption> = options
             .peek()
@@ -262,13 +265,11 @@ pub fn open_picker(ui: Ui, key: FontKey) {
 }
 
 /// The plan may name a copy of a listed font, so equal content counts as the same font.
-fn find_same_file(options: &[FontOption], path: &std::path::Path) -> Option<PathBuf> {
-    let digest = crate::work::project::hash_file(path).ok()?;
+fn find_same_file(options: &[FontOption], path: &Path) -> Option<PathBuf> {
+    let digest = project::hash_file(path).ok()?;
     options
         .iter()
-        .find(|option| {
-            crate::work::project::hash_file(&option.path).is_ok_and(|other| other == digest)
-        })
+        .find(|option| project::hash_file(&option.path).is_ok_and(|other| other == digest))
         .map(|option| option.path.clone())
 }
 
@@ -280,9 +281,12 @@ fn picker_body(ui: Ui) -> Rect {
     let mut list = rect()
         .width(Size::fill())
         .spacing(2.)
-        .child(original_row(ui, picked == Some(None)));
+        .child(original_row(ui, picked == Pick::Original));
     for (origin, title) in groups {
-        let items: Vec<&FontOption> = options.iter().filter(|o| o.origin == origin).collect();
+        let items: Vec<&FontOption> = options
+            .iter()
+            .filter(|option| option.origin == origin)
+            .collect();
         if items.is_empty() {
             continue;
         }
@@ -295,7 +299,7 @@ fn picker_body(ui: Ui) -> Rect {
             .children(
                 items
                     .into_iter()
-                    .map(|option| option_row(ui, option, &picked).into()),
+                    .map(|option| option_row(ui, option, picked.file()).into()),
             );
     }
     let hint = match &loaded {
@@ -332,7 +336,7 @@ fn original_row(ui: Ui, chosen: bool) -> Rect {
         .horizontal()
         .cross_align(Alignment::Center)
         .content(Content::flex())
-        .on_press(move |_| pick.set(Some(None)))
+        .on_press(move |_| pick.set(Pick::Original))
         .child(
             theme::text("Keep original", theme::BODY, theme::TEXT)
                 .font_weight(if chosen {
@@ -345,8 +349,8 @@ fn original_row(ui: Ui, chosen: bool) -> Rect {
         .child(theme::text("the game's own font", CAPTION, TERTIARY))
 }
 
-fn option_row(ui: Ui, option: &FontOption, picked: &Option<Option<PathBuf>>) -> Rect {
-    let chosen = picked.as_ref().and_then(Option::as_ref) == Some(&option.path);
+fn option_row(ui: Ui, option: &FontOption, picked_file: Option<&Path>) -> Rect {
+    let chosen = picked_file == Some(option.path.as_path());
     let path = option.path.clone();
     let mut pick = ui.picked;
     let letters = if option.missing.is_empty() {
@@ -366,7 +370,7 @@ fn option_row(ui: Ui, option: &FontOption, picked: &Option<Option<PathBuf>>) -> 
         .horizontal()
         .cross_align(Alignment::Center)
         .content(Content::flex())
-        .on_press(move |_| pick.set(Some(Some(path.clone()))))
+        .on_press(move |_| pick.set(Pick::File(path.clone())))
         .child(
             theme::text(option.label.clone(), theme::BODY, theme::TEXT)
                 .font_weight(if chosen {
@@ -394,7 +398,7 @@ fn add_font(ui: Ui) {
         let path = file.path().to_path_buf();
         match blocking::unblock(move || session::add_font_file(&path, &letters)).await {
             Ok(added) => {
-                picked.set(Some(Some(added.path.clone())));
+                picked.set(Pick::File(added.path.clone()));
                 options.write().get_or_insert_with(Vec::new).push(added);
             }
             Err(failure) => error.set(Some(format!("{failure:#}"))),
@@ -475,10 +479,10 @@ fn picker_buttons(ui: Ui, key: FontKey) -> Rect {
         )
         .child(
             theme::primary("Choose")
-                .enabled(picked.is_some())
+                .enabled(picked != Pick::Unset)
                 .on_press(move |_| {
                     dialog.set(Dialog::None);
-                    choose_source(ui, key.clone(), picked.clone().flatten());
+                    choose_source(ui, key.clone(), picked.file().map(Path::to_path_buf));
                 }),
         )
 }
@@ -491,7 +495,7 @@ fn folders_body(ui: Ui) -> Rect {
         .read()
         .games
         .iter()
-        .map(|g| g.folder.clone())
+        .map(|game| game.folder.clone())
         .collect();
     let mut library = ui.library;
     let mut found_games = ui.found_games;
@@ -516,7 +520,7 @@ fn folders_body(ui: Ui) -> Rect {
                         .compact()
                         .on_press(move |_| {
                             let mut next = library.read().clone();
-                            next.folders.retain(|f| f != &gone);
+                            next.folders.retain(|kept| kept != &gone);
                             let _ = session::save_library(&next);
                             found_games.set(session::find_games(&next.folders));
                             library.set(next);
@@ -536,7 +540,7 @@ fn folders_body(ui: Ui) -> Rect {
                         let target = path.clone();
                         let name = path
                             .file_name()
-                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
                         rect()
                             .width(Size::fill())
                             .horizontal()
@@ -595,7 +599,7 @@ fn save_fonts_body(ui: Ui) -> Rect {
     };
     let ticked = ui.saved_fonts.read().clone();
     let mut saved_fonts = ui.saved_fonts;
-    let shown = super::game::visible_entries(&game);
+    let shown = game::visible_entries(&game);
     rect()
         .width(Size::fill())
         .spacing(10.)
@@ -617,7 +621,7 @@ fn save_fonts_body(ui: Ui) -> Rect {
                             .on_press(move |_| {
                                 let mut next = saved_fonts.read().clone();
                                 if selected {
-                                    next.retain(|k| k != &key);
+                                    next.retain(|kept| kept != &key);
                                 } else {
                                     next.push(key.clone());
                                 }
@@ -744,7 +748,8 @@ fn updated_buttons(ui: Ui) -> Rect {
                 move |progress| {
                     let accepted = session::accept_update(&game)?;
                     // The update may move fonts inside the files, so they are found again first.
-                    let scanned = session::scan(&accepted.record, false, &letters, progress)?;
+                    let scanned =
+                        session::scan(&accepted.record, ScanDepth::Fast, &letters, progress)?;
                     session::apply(&scanned, progress)
                 },
                 move |applied| view.set(Some(applied)),

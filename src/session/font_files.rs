@@ -5,8 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::work::plan::Kind;
 
-use super::atlas::{atlas_png, find_entry, read_legacy_data};
-use super::{FontKey, GameView};
+use super::{FontKey, GameView, atlas};
 
 pub fn save_font_files(view: &GameView, keys: &[FontKey], folder: &Path) -> Result<Vec<PathBuf>> {
     let mut taken = HashSet::new();
@@ -25,12 +24,12 @@ pub fn save_font_files(view: &GameView, keys: &[FontKey], folder: &Path) -> Resu
 
 fn read_font_file(view: &GameView, key: &FontKey) -> Result<Option<(Vec<u8>, &'static str)>> {
     if key.kind == Kind::Tmp {
-        return Ok(atlas_png(view, key)?.map(|png| (png, "png")));
+        return Ok(atlas::atlas_png(view, key)?.map(|png| (png, "png")));
     }
-    let Some(entry) = find_entry(view, key) else {
+    let Some(entry) = atlas::find_entry(view, key) else {
         return Ok(None);
     };
-    Ok(read_legacy_data(view, entry)?.map(|data| {
+    Ok(atlas::read_legacy_data(view, entry)?.map(|data| {
         let extension = if data.starts_with(b"OTTO") {
             "otf"
         } else {

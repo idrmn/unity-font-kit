@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use freya::prelude::{
     Alignment, ChildrenExt, Color, Component, ContainerExt, ContainerSizeExt,
     ContainerWithContentExt, Content, Cursor, CursorIcon, Event, EventHandlersExt, FontWeight,
@@ -6,11 +8,13 @@ use freya::prelude::{
 };
 
 use super::icons;
+use super::tasks;
 use super::theme::{
-    self, ACCENT, CAPTION, ERROR, ERROR_TINT, OK, SECONDARY, SELECTION, TERTIARY, WARN, WINDOW,
+    self, ACCENT, CAPTION, ERROR, ERROR_TINT, OK, SECONDARY, SELECTION, Side, TERTIARY, WARN,
+    WINDOW,
 };
-use super::{Dialog, Ui, tasks};
-use crate::session::{self, GameRecord, GameStatus};
+use super::ui::{Dialog, Ui};
+use crate::session::{self, GameRecord, GameState, GameStatus};
 
 pub fn view(ui: Ui) -> impl IntoElement {
     let games = ui.library.read().games.clone();
@@ -18,7 +22,7 @@ pub fn view(ui: Ui) -> impl IntoElement {
         .width(Size::px(290.))
         .height(Size::fill())
         .background(WINDOW)
-        .border(theme::edge((false, true, false, false)))
+        .border(theme::edge(Side::Right))
         .content(Content::flex())
         .child(
             rect()
@@ -196,7 +200,14 @@ fn open_find_games(ui: Ui) {
 }
 
 pub fn open_game(ui: Ui, id: &str) {
-    let Some(record) = ui.library.read().games.iter().find(|g| g.id == id).cloned() else {
+    let Some(record) = ui
+        .library
+        .read()
+        .games
+        .iter()
+        .find(|game| game.id == id)
+        .cloned()
+    else {
         return;
     };
     if ui.busy.read().is_some() {
@@ -215,7 +226,7 @@ pub fn open_game(ui: Ui, id: &str) {
             let mut custom_letters = ui.custom_letters;
             custom_letters.set(custom);
             selected.set(Some(opened.record.id.clone()));
-            if let session::GameState::Updated { files } = &opened.state {
+            if let GameState::Updated { files } = &opened.state {
                 dialog.set(Dialog::Updated(files.clone()));
             }
             let (mut preset, mut chars) = (ui.preset, ui.chars);
@@ -242,7 +253,7 @@ pub fn add_game(ui: Ui) {
 }
 
 /// Adds without opening, so several found games can be added in a row while another task runs.
-pub fn add_to_library(ui: Ui, path: std::path::PathBuf) {
+pub fn add_to_library(ui: Ui, path: PathBuf) {
     let mut error = ui.error;
     spawn(async move {
         let read = blocking::unblock(move || session::read_game(&path)).await;
@@ -252,7 +263,7 @@ pub fn add_to_library(ui: Ui, path: std::path::PathBuf) {
     });
 }
 
-pub fn add_game_folder(ui: Ui, path: std::path::PathBuf) {
+pub fn add_game_folder(ui: Ui, path: PathBuf) {
     let mut error = ui.error;
     tasks::run(
         ui,

@@ -1,12 +1,15 @@
 use std::collections::HashSet;
+use std::fs::{self, File};
+use std::io::BufWriter;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use indexmap::{IndexMap, IndexSet};
+use png::{ColorType, Encoder};
 use serde_json::{Value, json};
 
-use super::kerning::{self, PairRecord};
-use super::pack::{self, Atlas};
+use super::kerning::{self, PairRecord, Shift};
+use super::pack::{self, Atlas, Size, Spot};
 use super::recipe::{self, Recipe};
 use super::render::{self, Gray, Metrics, Style, Tile};
 use crate::freetype::{Face, LOAD_DEFAULT, LOAD_NO_HINTING, Library};
@@ -22,22 +25,21 @@ pub struct Baked {
 pub fn write(recipe_path: &Path, font_path: &Path) -> Result<()> {
     let recipe = recipe::load(recipe_path)?;
     let font =
-        std::fs::read(font_path).with_context(|| format!("Cannot read {}", font_path.display()))?;
+        fs::read(font_path).with_context(|| format!("Cannot read {}", font_path.display()))?;
     let baked = bake(&recipe, &font)?;
-    let (baked_json, atlas_png) = recipe::artifact_paths(recipe_path)?;
-    project::write_text(&baked_json, &serde_json::to_string(&baked.data)?)?;
-    write_atlas_png(&atlas_png, &baked.atlas)
+    let artifacts = recipe::artifact_paths(recipe_path)?;
+    project::write_text(&artifacts.json, &serde_json::to_string(&baked.data)?)?;
+    write_atlas_png(&artifacts.png, &baked.atlas)
 }
 
 fn write_atlas_png(path: &Path, alpha: &Gray) -> Result<()> {
-    let file =
-        std::fs::File::create(path).with_context(|| format!("Cannot write {}", path.display()))?;
-    let mut encoder = png::Encoder::new(
-        std::io::BufWriter::new(file),
+    let file = File::create(path).with_context(|| format!("Cannot write {}", path.display()))?;
+    let mut encoder = Encoder::new(
+        BufWriter::new(file),
         alpha.width as u32,
         alpha.height as u32,
     );
-    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_color(ColorType::Rgba);
     let rgba: Vec<u8> = alpha.data.iter().flat_map(|&a| [a, a, a, a]).collect();
     encoder.write_header()?.write_image_data(&rgba)?;
     Ok(())
@@ -57,9 +59,9 @@ pub fn bake(recipe: &Recipe, font: &[u8]) -> Result<Baked> {
             recipe.render_mode
         );
     }
-    let library = Library::new()?;
+    let library = Library::try_new()?;
     library.set_interpreter_version(render::interpreter_for(&recipe.unity_version))?;
-    let face = Face::from_bytes(&library, font)?;
+    let face = Face::try_new(&library, font)?;
     face.set_char_size(recipe.point_size * 64)?;
     let indices = map_codepoints(&face, &recipe.codepoints);
     let unique: Vec<u32> = indices
@@ -127,40 +129,39 @@ fn pack_tiles(tiles: &IndexMap<u32, Tile>, recipe: &Recipe) -> Atlas {
         .values()
         .filter(|tile| !tile.pixels.is_empty())
         .map(|tile| {
-            let size = (
-                tile.size.0 + 2 * recipe.padding + spacing,
-                tile.size.1 + 2 * recipe.padding + spacing,
-            );
+            let size = Size {
+                width: tile.size.width + 2 * recipe.padding + spacing,
+                height: tile.size.height + 2 * recipe.padding + spacing,
+            };
             (tile.index, size)
         })
         .collect();
-    pack::pack_growing(
-        &items,
-        (recipe.atlas_width, recipe.atlas_height),
-        recipe.padding,
-        spacing,
-    )
+    let start = Size {
+        width: recipe.atlas_width,
+        height: recipe.atlas_height,
+    };
+    pack::pack_growing(&items, start, recipe.padding, spacing)
 }
 
-fn describe_glyph(tile: &Tile, spot: Option<&(usize, usize)>) -> Value {
-    let (x, y) = spot.copied().unwrap_or((0, 0));
+fn describe_glyph(tile: &Tile, spot: Option<&Spot>) -> Value {
+    let Spot { x, y } = spot.copied().unwrap_or(Spot { x: 0, y: 0 });
     json!({
         "m_Index": tile.index,
         "m_Metrics": describe_metrics(tile.metrics),
-        "m_GlyphRect": {"m_X": x, "m_Y": y, "m_Width": tile.size.0, "m_Height": tile.size.1},
+        "m_GlyphRect": {"m_X": x, "m_Y": y, "m_Width": tile.size.width, "m_Height": tile.size.height},
         "m_Scale": 1.0,
         "m_AtlasIndex": 0,
         "m_ClassDefinitionType": 0,
     })
 }
 
-fn describe_metrics(m: Metrics) -> Value {
+fn describe_metrics(metrics: Metrics) -> Value {
     json!({
-        "m_Width": m.width,
-        "m_Height": m.height,
-        "m_HorizontalBearingX": m.bearing_x,
-        "m_HorizontalBearingY": m.bearing_y,
-        "m_HorizontalAdvance": m.advance,
+        "m_Width": metrics.width,
+        "m_Height": metrics.height,
+        "m_HorizontalBearingX": metrics.bearing_x,
+        "m_HorizontalBearingY": metrics.bearing_y,
+        "m_HorizontalAdvance": metrics.advance,
     })
 }
 
@@ -169,14 +170,14 @@ fn describe_character(codepoint: u32, index: u32) -> Value {
 }
 
 fn describe_pair(pair: &PairRecord) -> Value {
-    let record = |index: u32, shift: [f64; 4]| {
+    let record = |index: u32, shift: Shift<f64>| {
         json!({
             "m_GlyphIndex": index,
             "m_GlyphValueRecord": {
-                "m_XPlacement": shift[0],
-                "m_YPlacement": shift[1],
-                "m_XAdvance": shift[2],
-                "m_YAdvance": shift[3],
+                "m_XPlacement": shift.x_placement,
+                "m_YPlacement": shift.y_placement,
+                "m_XAdvance": shift.x_advance,
+                "m_YAdvance": shift.y_advance,
             },
         })
     };
@@ -191,7 +192,7 @@ fn describe_pair(pair: &PairRecord) -> Value {
 fn draw_atlas(tiles: &IndexMap<u32, Tile>, atlas: &Atlas, padding: usize) -> Gray {
     let (width, height) = (atlas.width, atlas.height);
     let mut flipped = vec![0u8; width * height];
-    for (index, &(x, y)) in &atlas.spots {
+    for (index, &Spot { x, y }) in &atlas.spots {
         let pixels = &tiles[index].pixels;
         for row in 0..pixels.height {
             let source = &pixels.data[(pixels.height - 1 - row) * pixels.width..][..pixels.width];
@@ -222,9 +223,9 @@ fn draw_atlas(tiles: &IndexMap<u32, Tile>, atlas: &Atlas, padding: usize) -> Gra
 }
 
 pub fn read_font_face_info(font: &[u8], point_size: i64, unity_version: &str) -> Result<Value> {
-    let library = Library::new()?;
+    let library = Library::try_new()?;
     library.set_interpreter_version(render::interpreter_for(unity_version))?;
-    let face = Face::from_bytes(&library, font)?;
+    let face = Face::try_new(&library, font)?;
     face.set_char_size(point_size * 64)?;
     read_face_info(&face, point_size)
 }

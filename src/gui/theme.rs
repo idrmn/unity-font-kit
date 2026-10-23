@@ -33,7 +33,6 @@ pub const RAISED: Color = Color::from_rgb(252, 253, 254);
 pub const OVERLAY: Color = Color::from_rgb(255, 255, 255);
 // A chosen item comes up one level, to the colour of the content beside it.
 pub const SELECTION: Color = CONTENT;
-pub const SPECIMEN: Color = Color::from_rgb(18, 22, 25);
 pub const SPECIMEN_TEXT: Color = Color::from_rgb(244, 244, 244);
 
 pub const TEXT: Color = Color::from_rgb(18, 22, 25);
@@ -61,7 +60,6 @@ pub const ERROR_TINT: Color = Color::from_argb(26, 218, 30, 40);
 pub const BODY: f32 = 15.;
 pub const CAPTION: f32 = 12.;
 pub const DIALOG_TITLE: f32 = 19.;
-pub const TITLE: f32 = 24.;
 
 pub const CONTROL_RADIUS: f32 = 6.;
 pub const PANEL_RADIUS: f32 = 10.;
@@ -69,14 +67,17 @@ pub const DIALOG_RADIUS: f32 = 14.;
 // 0.6 matches Figma's "iOS" corner smoothing: a squircle rather than a rounded rectangle.
 const SMOOTHING: f32 = 0.6;
 
+#[must_use]
 pub fn corners() -> CornerRadius {
     rounded(CONTROL_RADIUS)
 }
 
+#[must_use]
 pub fn rounded(radius: f32) -> CornerRadius {
     CornerRadius::new_all(radius).with_smoothing(SMOOTHING)
 }
 
+#[must_use]
 pub fn hairline(color: Color) -> Border {
     Border::new()
         .fill(color)
@@ -84,14 +85,23 @@ pub fn hairline(color: Color) -> Border {
         .alignment(BorderAlignment::Inner)
 }
 
-/// A separator line on chosen sides only, as `(top, right, bottom, left)` flags.
-pub fn edge(sides: (bool, bool, bool, bool)) -> Border {
-    let width = |on: bool| if on { 1. } else { 0. };
+#[derive(Clone, Copy)]
+pub enum Side {
+    Top,
+    Right,
+}
+
+#[must_use]
+pub fn edge(side: Side) -> Border {
+    let (top, right) = match side {
+        Side::Top => (1., 0.),
+        Side::Right => (0., 1.),
+    };
     hairline(SEPARATOR).width(BorderWidth {
-        top: width(sides.0),
-        right: width(sides.1),
-        bottom: width(sides.2),
-        left: width(sides.3),
+        top,
+        right,
+        bottom: 0.,
+        left: 0.,
     })
 }
 
@@ -103,12 +113,14 @@ fn shadow(y: f32, blur: f32, spread: f32, alpha: u8) -> Shadow {
         .color(Color::from_argb(alpha, 18, 22, 25))
 }
 
+#[must_use]
 pub fn raised(card: Rect) -> Rect {
     card.background(RAISED)
         .border(hairline(SEPARATOR))
         .shadow(shadow(1., 2., 0., 15))
 }
 
+#[must_use]
 pub fn modal(card: Rect) -> Rect {
     card.background(OVERLAY)
         .corner_radius(rounded(DIALOG_RADIUS))
@@ -117,18 +129,22 @@ pub fn modal(card: Rect) -> Rect {
         .shadow(shadow(24., 60., 0., 46))
 }
 
+#[must_use]
 pub fn text(value: impl Into<String>, size: f32, color: Color) -> Rect {
     rect().font_size(size).color(color).child(value.into())
 }
 
+#[must_use]
 pub fn strong(value: impl Into<String>, size: f32) -> Rect {
     text(value, size, TEXT).font_weight(FontWeight::SEMI_BOLD)
 }
 
+#[must_use]
 pub fn caption(value: impl Into<String>) -> Rect {
     text(value, CAPTION, SECONDARY).font_weight(FontWeight::MEDIUM)
 }
 
+#[must_use]
 pub fn dot(color: Color) -> Rect {
     rect()
         .width(Size::px(7.))
@@ -138,6 +154,7 @@ pub fn dot(color: Color) -> Rect {
 }
 
 /// A short vertical line between groups of buttons.
+#[must_use]
 pub fn separator() -> Rect {
     rect()
         .width(Size::px(1.))
@@ -145,6 +162,7 @@ pub fn separator() -> Rect {
         .background(SEPARATOR)
 }
 
+#[must_use]
 pub fn divider() -> Rect {
     rect()
         .width(Size::fill())
@@ -153,26 +171,31 @@ pub fn divider() -> Rect {
 }
 
 /// Freya draws a disabled button like an enabled one, so it is faded here.
+#[must_use]
 pub fn dimmed(enabled: bool, button: Button) -> Rect {
     rect()
         .opacity(if enabled { 1. } else { 0.45 })
         .child(button.enabled(enabled))
 }
 
+#[must_use]
 pub fn primary(label: &str) -> Button {
     Button::new().filled().child(label.to_string())
 }
 
+#[must_use]
 pub fn secondary(label: &str) -> Button {
     Button::new().child(label.to_string())
 }
 
+#[must_use]
 pub fn primary_with(icon: Icon, label: &str) -> Button {
     Button::new()
         .filled()
         .child(labelled(icon, label, Color::WHITE))
 }
 
+#[must_use]
 pub fn secondary_with(icon: Icon, label: &str) -> Button {
     Button::new().child(labelled(icon, label, TEXT))
 }
@@ -186,6 +209,7 @@ fn labelled(icon: Icon, label: &str, color: Color) -> Rect {
         .child(label.to_string())
 }
 
+#[must_use]
 pub fn destructive(label: &str) -> Button {
     Button::new()
         .theme_colors(ButtonColorsThemePartial {
@@ -198,6 +222,7 @@ pub fn destructive(label: &str) -> Button {
         .child(label.to_string())
 }
 
+#[must_use]
 pub fn line(value: impl Into<String>, size: f32, color: Color) -> Label {
     label()
         .text(value.into())
@@ -208,6 +233,7 @@ pub fn line(value: impl Into<String>, size: f32, color: Color) -> Label {
         .color(color)
 }
 
+#[must_use]
 pub fn build() -> Theme {
     let mut theme = light_theme();
     theme.colors = palette(theme.colors);

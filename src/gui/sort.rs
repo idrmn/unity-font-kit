@@ -29,6 +29,7 @@ impl Default for Sort {
 
 impl Sort {
     /// Used means nothing where no texts are counted, so those games group by file.
+    #[must_use]
     pub fn in_effect(self, counted: bool) -> Sort {
         match (self.key, counted) {
             (SortKey::Used, false) => Sort {
@@ -41,6 +42,7 @@ impl Sort {
 
     /// A click on the Font heading switches between name order and file groups;
     /// a second click on another heading turns its order round.
+    #[must_use]
     pub fn after_click(self, clicked: SortKey) -> Sort {
         match (clicked, self.key) {
             (SortKey::Name | SortKey::File, SortKey::Name) => Sort {
@@ -68,6 +70,7 @@ impl Sort {
 }
 
 /// Games drawn without uGUI or TextMeshPro texts count none.
+#[must_use]
 pub fn has_counts(game: &GameView) -> bool {
     game.plan
         .iter()
@@ -75,6 +78,7 @@ pub fn has_counts(game: &GameView) -> bool {
         .any(|entry| entry.texts > 0)
 }
 
+#[must_use]
 pub fn select_entries(game: &GameView, search: &str, sort: Sort) -> Vec<Entry> {
     let wanted = search.trim().to_lowercase();
     let mut shown: Vec<Entry> = game
@@ -140,17 +144,26 @@ fn matches_search(entry: &Entry, wanted: &str) -> bool {
             .any(|place| place.file.to_lowercase().contains(wanted))
 }
 
+pub struct Group {
+    pub heading: String,
+    pub entries: Vec<Entry>,
+}
+
 /// Rows under their file's heading when grouped by file; otherwise one list without headings.
-pub fn group_entries(entries: Vec<Entry>, sort: Sort) -> Vec<(String, Vec<Entry>)> {
-    let mut groups: Vec<(String, Vec<Entry>)> = Vec::new();
+#[must_use]
+pub fn group_entries(entries: Vec<Entry>, sort: Sort) -> Vec<Group> {
+    let mut groups: Vec<Group> = Vec::new();
     for entry in entries {
         let heading = match sort.key {
             SortKey::File => first_file(&entry).to_string(),
             _ => String::new(),
         };
         match groups.last_mut() {
-            Some((last, members)) if *last == heading => members.push(entry),
-            _ => groups.push((heading, vec![entry])),
+            Some(last) if last.heading == heading => last.entries.push(entry),
+            _ => groups.push(Group {
+                heading,
+                entries: vec![entry],
+            }),
         }
     }
     groups

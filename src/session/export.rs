@@ -4,20 +4,20 @@ use anyhow::{Result, bail};
 
 use crate::game::folder;
 use crate::progress::{Progress, Report};
-use crate::work::export as players;
+use crate::work::export;
 
-use super::state::open_work;
-use super::{FontStatus, GameState, GameView};
+use super::{FontStatus, GameState, GameView, state};
 
 fn default_readme(view: &GameView) -> String {
     let folder = folder::find_data_dir(&view.record.folder)
         .ok()
         .and_then(|dir| Some(dir.file_name()?.to_string_lossy().into_owned()))
         .unwrap_or_else(|| format!("{}_Data", view.record.name));
-    players::default_readme(&view.record.name, &folder).unwrap_or_default()
+    export::default_readme(&view.record.name, &folder).unwrap_or_default()
 }
 
 /// Only what is in the game now, so the patch holds fonts that were seen there.
+#[must_use]
 pub fn can_export(view: &GameView) -> bool {
     let pending = view
         .statuses
@@ -31,11 +31,11 @@ pub fn export(view: &GameView, target: &Path, progress: Report) -> Result<PathBu
         bail!("Apply your fonts first and check them in the game");
     }
     let game = folder::locate(&view.record.folder)?;
-    let work = open_work(&view.home, &view.record)?;
+    let work = state::open_work(&view.home, &view.record)?;
     progress(Progress {
         done: 0,
         total: 1,
         step: "Making the zip".to_string(),
     });
-    players::export_to(&work, &game.data_dir, &default_readme(view), target)
+    export::export_to(&work, &game.data_dir, &default_readme(view), target)
 }

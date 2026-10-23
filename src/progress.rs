@@ -12,7 +12,7 @@ pub struct Progress {
 /// Called from the thread that does the work; false once the user stopped it.
 pub type Report<'a> = &'a (dyn Fn(Progress) -> bool + Sync);
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct Stopped;
 
 impl fmt::Display for Stopped {

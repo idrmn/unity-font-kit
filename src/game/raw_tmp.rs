@@ -5,6 +5,7 @@ const RECORD_SIZE: usize = 16;
 const MAX_GLYPH_INDEX: u32 = 1 << 20;
 const MAX_CHARACTERS: i32 = 1 << 18;
 
+#[must_use]
 pub fn extract_codepoints(raw: &[u8]) -> HashSet<u32> {
     let mut longest: Vec<u32> = Vec::new();
     for offset in (0..raw.len().saturating_sub(4)).step_by(4) {

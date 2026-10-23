@@ -6,6 +6,7 @@ pub struct Mask {
 }
 
 impl Mask {
+    #[must_use]
     pub fn new(width: usize, height: usize) -> Mask {
         Mask {
             width,
@@ -14,6 +15,7 @@ impl Mask {
         }
     }
 
+    #[must_use]
     pub fn get(&self, row: usize, col: usize) -> bool {
         self.cells[row * self.width + col]
     }
@@ -22,10 +24,12 @@ impl Mask {
         self.cells[row * self.width + col] = value;
     }
 
+    #[must_use]
     pub fn any(&self) -> bool {
         self.cells.iter().any(|cell| *cell)
     }
 
+    #[must_use]
     pub fn inverted(&self) -> Mask {
         Mask {
             cells: self.cells.iter().map(|cell| !cell).collect(),
@@ -37,6 +41,7 @@ impl Mask {
 const FAR: i64 = i64::MAX / 4;
 
 /// For every cell, the squared distance to the nearest `true` cell (`FAR` if there is none).
+#[must_use]
 pub fn squared_distance_to(targets: &Mask) -> Vec<i64> {
     let (width, height) = (targets.width, targets.height);
     let mut grid: Vec<i64> = targets
@@ -63,6 +68,7 @@ pub fn squared_distance_to(targets: &Mask) -> Vec<i64> {
 
 /// With no target at all it measures to the point (-1, 0); the bsdf fallback for a solid glyph
 /// without padding relies on it.
+#[must_use]
 pub fn edt_squared(targets: &Mask) -> Vec<i64> {
     if targets.any() {
         return squared_distance_to(targets);
@@ -118,6 +124,7 @@ fn intersection(values: &[i64], v: usize, q: usize) -> f64 {
     numerator as f64 / (2 * (q_i - v_i)) as f64
 }
 
+#[must_use]
 pub fn root(squared: i64) -> f64 {
     if squared >= FAR {
         return f64::INFINITY;

@@ -8,6 +8,8 @@ use freya::prelude::{
 };
 use freya::text_edit::{EditableConfig, EditableEvent, EditorLine, TextEditor, use_editable};
 
+use super::theme;
+
 /// Enter adds a line instead of submitting.
 #[derive(Clone, PartialEq)]
 pub struct TextArea {
@@ -23,6 +25,7 @@ impl KeyExt for TextArea {
 }
 
 impl TextArea {
+    #[must_use]
     pub fn new(value: impl Into<Writable<String>>) -> Self {
         Self {
             value: value.into(),
@@ -31,6 +34,7 @@ impl TextArea {
         }
     }
 
+    #[must_use]
     pub fn min_height(mut self, min_height: f32) -> Self {
         self.min_height = min_height;
         self
@@ -59,8 +63,8 @@ impl Component for TextArea {
             editor.move_cursor_to(value.read().encode_utf16().count());
         }
 
-        let on_key_down = move |e: Event<KeyboardEventData>| {
-            match &e.key {
+        let on_key_down = move |event: Event<KeyboardEventData>| {
+            match &event.key {
                 Key::Named(NamedKey::Tab) => return,
                 Key::Named(NamedKey::Escape) => {
                     a11y_id.request_unfocus();
@@ -68,11 +72,11 @@ impl Component for TextArea {
                 }
                 _ => {}
             }
-            e.stop_propagation();
-            e.prevent_default();
+            event.stop_propagation();
+            event.prevent_default();
             editable.process_event(EditableEvent::KeyDown {
-                key: &e.key,
-                modifiers: e.modifiers,
+                key: &event.key,
+                modifiers: event.modifiers,
             });
             let text = editable.editor().read().committed_text();
             if *value.read() != text {
@@ -80,14 +84,14 @@ impl Component for TextArea {
             }
         };
 
-        let on_key_up = move |e: Event<KeyboardEventData>| {
-            e.stop_propagation();
-            editable.process_event(EditableEvent::KeyUp { key: &e.key });
+        let on_key_up = move |event: Event<KeyboardEventData>| {
+            event.stop_propagation();
+            editable.process_event(EditableEvent::KeyUp { key: &event.key });
         };
 
-        let on_focus_press = move |e: Event<FocusPressEventData>| {
-            e.stop_propagation();
-            e.prevent_default();
+        let on_focus_press = move |event: Event<FocusPressEventData>| {
+            event.stop_propagation();
+            event.prevent_default();
             a11y_id.request_focus();
             // Marks the press as inside, so the release does not unfocus.
             dragging.set_if_modified(true);
@@ -96,7 +100,7 @@ impl Component for TextArea {
                 return;
             }
             let area = area.read().to_f64();
-            let global = e.global_location().clamp(area.min(), area.max());
+            let global = event.global_location().clamp(area.min(), area.max());
             editable.process_event(EditableEvent::Down {
                 location: (global - area.min()).to_point(),
                 editor_line: EditorLine::SingleParagraph,
@@ -104,11 +108,11 @@ impl Component for TextArea {
             });
         };
 
-        let on_global_pointer_move = move |e: Event<PointerEventData>| {
+        let on_global_pointer_move = move |event: Event<PointerEventData>| {
             if is_empty || !a11y_id.is_focused() || !*dragging.read() {
                 return;
             }
-            let mut location = e.global_location();
+            let mut location = event.global_location();
             location.x -= area.read().min_x() as f64;
             location.y -= area.read().min_y() as f64;
             editable.process_event(EditableEvent::Move {
@@ -118,9 +122,9 @@ impl Component for TextArea {
             });
         };
 
-        let on_pointer_press = move |e: Event<PointerEventData>| {
-            e.stop_propagation();
-            e.prevent_default();
+        let on_pointer_press = move |event: Event<PointerEventData>| {
+            event.stop_propagation();
+            event.prevent_default();
             editable.process_event(EditableEvent::Release);
             dragging.set_if_modified(false);
         };
@@ -173,12 +177,12 @@ impl Component for TextArea {
             .min_height(Size::px(self.min_height))
             .background(colors.surface_tertiary)
             .border(border)
-            .corner_radius(super::theme::corners())
+            .corner_radius(theme::corners())
             .padding(10.)
             .child(
                 paragraph()
                     .holder(holder.read().clone())
-                    .on_sized(move |e: Event<SizedEventData>| area.set(e.visible_area))
+                    .on_sized(move |event: Event<SizedEventData>| area.set(event.visible_area))
                     .width(Size::fill())
                     .font_size(13.)
                     .line_height(1.4)
@@ -189,7 +193,7 @@ impl Component for TextArea {
                     })
                     .cursor_index(cursor_index)
                     .cursor_color(colors.text_primary)
-                    .highlights(selection.map(|s| vec![s]))
+                    .highlights(selection.map(|range| vec![range]))
                     .span(shown_text),
             )
     }

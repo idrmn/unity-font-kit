@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{ErrorKind, Write};
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -57,7 +57,7 @@ pub fn list_files(root: &Path) -> Result<Vec<String>> {
 fn collect_files(dir: &Path, prefix: &str, files: &mut Vec<String>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error).with_context(|| format!("Cannot read {}", dir.display())),
     };
     for entry in entries {
@@ -82,7 +82,7 @@ pub fn hash_file(path: &Path) -> Result<String> {
     if !path.is_file() {
         return Ok(String::new());
     }
-    downloads::hash_files(&[path.to_path_buf()])
+    downloads::hash_files(&[path])
 }
 
 pub fn read_installed(project: &Project) -> Result<Hashes> {
@@ -211,7 +211,7 @@ pub fn copy_atomically(source: &Path, target: &Path) -> Result<()> {
 }
 
 /// On Windows a file the running game holds open gives a sharing or lock violation.
-fn is_permission_error(error: &std::io::Error) -> bool {
+fn is_permission_error(error: &io::Error) -> bool {
     const SHARING_VIOLATION: i32 = 32;
     const LOCK_VIOLATION: i32 = 33;
     error.kind() == ErrorKind::PermissionDenied
@@ -223,10 +223,10 @@ fn is_permission_error(error: &std::io::Error) -> bool {
 }
 
 /// Contents reach the disk before the rename, so a power loss leaves the old file or the new one.
-fn copy_durably(source: &Path, target: &Path) -> std::io::Result<()> {
+fn copy_durably(source: &Path, target: &Path) -> io::Result<()> {
     let mut from = File::open(source)?;
     let mut to = File::create(target)?;
-    std::io::copy(&mut from, &mut to)?;
+    io::copy(&mut from, &mut to)?;
     to.set_modified(from.metadata()?.modified()?)?;
     to.sync_all()?;
     drop(to);
@@ -274,7 +274,7 @@ fn install_with(
             copy(&project.backup.join(&file), &data_dir.join(&file))?;
         }
     }
-    let kept = files
+    let kept: Hashes = files
         .iter()
         .map(|file| {
             (
@@ -318,6 +318,7 @@ fn remove_if_present(path: &Path) -> Result<()> {
 
 /// Text files get the system's line ends; the old file stays whole until the new one is on disk.
 pub fn write_text(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
     let text = if cfg!(windows) {
         text.replace('\n', "\r\n")
     } else {

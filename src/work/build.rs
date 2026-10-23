@@ -1,20 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use indexmap::IndexMap;
-use sha1::{Digest, Sha1};
+use sha1::Sha1;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
 use crate::fonts::charsets::{self, Charset};
-use crate::fonts::{extract, font_file};
+use crate::fonts::extract;
+use crate::fonts::font_file::{self, FontCheck};
+use crate::game::addressables::{self, Catalogs};
 use crate::game::folder::{self, Game};
 use crate::game::scan::{self, LegacyFont, Ref, ScanResult, TmpFont};
-use crate::game::{addressables, typetrees::Generator};
+use crate::game::typetrees::Generator;
 use crate::progress::{self, Report};
-use crate::rebuild::inject::{self, Bake, Done, Options, Reset, Swap};
+use crate::rebuild::inject::{self, Bake, Done, Files, Jobs, Options, Reset, Swap};
 use crate::rebuild::{bake, recipe};
-use crate::work::plan::{self, Entry, Kind, Place, Plan};
+use crate::work::plan::{self, Entry, FontKey, Kind, Place, Plan};
 use crate::work::project::{self, Project};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,9 +28,26 @@ pub struct Built {
     pub unchanged: Vec<String>,
 }
 
-type Key<'a> = (Kind, &'a str, &'a str);
-type FamilyKey = (Kind, String, String);
-type Sources<'a> = HashMap<Key<'a>, PathBuf>;
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FamilyKey {
+    pub kind: Kind,
+    pub family: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Shared {
+    pub plan: Plan,
+    pub notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CatalogFiles {
+    pub readable: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+type Sources = HashMap<FontKey, PathBuf>;
 
 pub fn select_entries(plan: &Plan) -> Result<Vec<&Entry>> {
     if plan.fonts.is_empty() {
@@ -45,7 +64,8 @@ pub fn select_entries(plan: &Plan) -> Result<Vec<&Entry>> {
     Ok(chosen)
 }
 
-pub fn share_family_sources(plan: Plan) -> (Plan, Vec<String>) {
+#[must_use]
+pub fn share_family_sources(plan: Plan) -> Shared {
     let chosen = find_donors(&plan.fonts);
     let fonts: Vec<Entry> = plan
         .fonts
@@ -58,23 +78,33 @@ pub fn share_family_sources(plan: Plan) -> (Plan, Vec<String>) {
         .zip(&fonts)
         .filter(|(old, new)| old.source != new.source)
         .map(|(_, new)| {
-            let donor = chosen.get(&family_key(new)).map_or("", |d| d.font.as_str());
+            let donor = chosen
+                .get(&family_key(new))
+                .map_or("", |donor| donor.font.as_str());
             format!(
                 "{}: source is empty, using {} from {donor}, same font",
                 new.font, new.source
             )
         })
         .collect();
-    (Plan { fonts, ..plan }, notes)
+    Shared {
+        plan: Plan { fonts, ..plan },
+        notes,
+    }
 }
 
+#[must_use]
 pub fn family_key(entry: &Entry) -> FamilyKey {
     // Old TMP fonts store the family without its style, so the name tells Bold from Italic; sizes are digits.
     let name: String = plan::normalize(&entry.font)
         .chars()
         .filter(|ch| get_general_category(*ch) != GeneralCategory::DecimalNumber)
         .collect();
-    (entry.kind, entry.family.clone(), name)
+    FamilyKey {
+        kind: entry.kind,
+        family: entry.family.clone(),
+        name,
+    }
 }
 
 fn find_donors(fonts: &[Entry]) -> HashMap<FamilyKey, Entry> {
@@ -103,7 +133,7 @@ fn pick_donor<'a>(entries: &[&'a Entry]) -> Option<&'a Entry> {
         by_hand
     };
     let sources: HashSet<&str> = chosen.iter().map(|entry| entry.source.as_str()).collect();
-    (sources.len() == 1).then(|| chosen[0])
+    chosen.first().copied().filter(|_| sources.len() == 1)
 }
 
 fn borrow_source(entry: &Entry, chosen: &HashMap<FamilyKey, Entry>) -> Entry {
@@ -156,11 +186,8 @@ pub fn check_sources(
     Ok(lines)
 }
 
-pub fn describe_flaws(
-    name: &str,
-    checked: &font_file::FontCheck,
-    charset: &Charset,
-) -> Vec<String> {
+#[must_use]
+pub fn describe_flaws(name: &str, checked: &FontCheck, charset: &Charset) -> Vec<String> {
     let empty = (!checked.empty.is_empty()).then(|| {
         format!(
             "{name}: {} have no outline and show as blank",
@@ -178,10 +205,16 @@ pub fn describe_flaws(
     empty.into_iter().chain(aliased).collect()
 }
 
+#[must_use]
 pub fn recipe_path(work: &Project, entry: &Entry, place: &Place) -> PathBuf {
+    use sha1::Digest;
     // Windows paths stop at 260 characters, and bundle paths can be that long on their own.
     let digest = Sha1::digest(format!("{}|{}", place.file, place.cab).as_bytes());
-    let file_tag: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    let file_tag: String = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     work.recipes.join(format!(
         "{} {file_tag} {}{}",
         extract::safe_stem(&entry.font),
@@ -219,7 +252,8 @@ fn is_at(reference: &Ref, name: &str, entry: &Entry, place: &Place) -> bool {
 }
 
 fn is_place(reference: &Ref, place: &Place) -> bool {
-    reference.1 == place.path_id && (place.cab.is_empty() || reference.0 == place.cab)
+    reference.path_id == place.path_id
+        && (place.cab.is_empty() || reference.serialized_file == place.cab)
 }
 
 fn scanned_file<'a>(
@@ -275,9 +309,9 @@ pub fn find_legacy_font<'a>(
         })
 }
 
-fn source_of<'a, 'e>(sources: &'a Sources<'e>, entry: &'e Entry) -> Result<&'a PathBuf> {
+fn source_of<'a>(sources: &'a Sources, entry: &Entry) -> Result<&'a PathBuf> {
     sources
-        .get(&plan::entry_key(entry))
+        .get(&FontKey::of(entry))
         .with_context(|| format!("no source for {}", entry.font))
 }
 
@@ -296,7 +330,7 @@ fn make_swaps(
         .map(|((entry, place), font)| {
             Ok(Swap {
                 file: place.file.clone(),
-                serialized_file: font.reference.0.clone(),
+                serialized_file: font.reference.serialized_file.clone(),
                 path_id: place.path_id,
                 font: entry.font.clone(),
                 source: source_of(sources, entry)?.clone(),
@@ -341,7 +375,7 @@ fn make_resets(
         .map(|((entry, place), font)| {
             Ok(Reset {
                 file: place.file.clone(),
-                serialized_file: font.reference.0.clone(),
+                serialized_file: font.reference.serialized_file.clone(),
                 path_id: place.path_id,
                 font: font.name.clone(),
                 source: source_of(sources, entry)?.clone(),
@@ -411,7 +445,7 @@ pub fn build(
     let entries = select_entries(plan)?;
     let sources = entries
         .iter()
-        .map(|entry| Ok((plan::entry_key(entry), resolve_source(entry, &work.plan)?)))
+        .map(|entry| Ok((FontKey::of(entry), resolve_source(entry, &work.plan)?)))
         .collect::<Result<Sources>>()?;
     let legacy_entries: Vec<&Entry> = entries
         .iter()
@@ -423,7 +457,10 @@ pub fn build(
     let targets = list_places(&entries, Kind::Tmp);
     let swapped = list_places(&entries, Kind::Legacy);
     let files = list_changed_files(&targets, &swapped, &legacy_entries);
-    let (catalogs, unchanged) = find_catalogs(work, &found.data_dir, &files)?;
+    let CatalogFiles {
+        readable: catalogs,
+        unchanged,
+    } = find_catalogs(work, &found.data_dir, &files)?;
     // Hashed before reading, so install notices any change made while build runs.
     let read_hashes = project::hash_originals(
         work,
@@ -435,7 +472,7 @@ pub fn build(
     progress::check(report, "Baking")?;
     let bakes = bake_targets(&context, &targets, &scanned, &sources)?;
     let mut not_baked = collect_not_baked(&targets, &bakes);
-    let jobs = inject::Jobs {
+    let jobs = Jobs {
         bakes,
         swaps: make_swaps(&swapped, &scanned, &sources)?,
         resets: make_resets(&legacy_entries, &scanned, &sources, &found.unity_version)?,
@@ -471,7 +508,7 @@ fn list_changed_files(
         .chain(swapped)
         .map(|(_, place)| place.file.clone())
         .chain(cleared.map(|place| place.file.clone()))
-        .collect::<std::collections::BTreeSet<_>>()
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
 }
@@ -481,7 +518,7 @@ fn bake_targets(
     targets: &[(&Entry, &Place)],
     scanned: &HashMap<String, ScanResult>,
     sources: &Sources,
-) -> Result<Vec<inject::Bake>> {
+) -> Result<Vec<Bake>> {
     let Steps {
         found,
         work,
@@ -510,7 +547,7 @@ fn bake_targets(
     recipes.iter().map(|path| inject::load_bake(path)).collect()
 }
 
-fn write_patched(context: &Steps, jobs: inject::Jobs, catalogs: &[String]) -> Result<Vec<Done>> {
+fn write_patched(context: &Steps, jobs: Jobs, catalogs: &[String]) -> Result<Vec<Done>> {
     let Steps {
         found,
         work,
@@ -521,7 +558,7 @@ fn write_patched(context: &Steps, jobs: inject::Jobs, catalogs: &[String]) -> Re
     } = *context;
     let partial = with_suffix(&work.patched, ".partial");
     remove_tree(&partial);
-    let files = inject::Files {
+    let files = Files {
         data_dir: &found.data_dir,
         originals: Some(&work.backup),
         out_dir: &partial,
@@ -559,20 +596,16 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-pub fn find_catalogs(
-    work: &Project,
-    data_dir: &Path,
-    files: &[String],
-) -> Result<(Vec<String>, Vec<String>)> {
+pub fn find_catalogs(work: &Project, data_dir: &Path, files: &[String]) -> Result<CatalogFiles> {
     if !addressables::touches_bundles(files) {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(CatalogFiles::default());
     }
     let original = |name: &str| project::original_file(Some(&work.backup), data_dir, name);
     let settings = original(addressables::SETTINGS);
     let found = if settings.is_file() {
         addressables::list_catalogs(&read_text(&settings)?)?
     } else {
-        addressables::Catalogs {
+        Catalogs {
             local: vec![
                 addressables::JSON_CATALOG.to_string(),
                 addressables::BINARY_CATALOG.to_string(),
@@ -588,7 +621,10 @@ pub fn find_catalogs(
     let (readable, other): (Vec<String>, Vec<String>) = present
         .into_iter()
         .partition(|name| name.ends_with(".json") || name.ends_with(".bin"));
-    Ok((readable, [other, found.elsewhere].concat()))
+    Ok(CatalogFiles {
+        readable,
+        unchanged: [other, found.elsewhere].concat(),
+    })
 }
 
 fn read_text(path: &Path) -> Result<String> {
@@ -602,7 +638,10 @@ pub fn write_cleared_catalog(source: &Path, target: &Path) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Cannot create {}", parent.display()))?;
     }
-    if source.extension().is_some_and(|ext| ext == "bin") {
+    if source
+        .extension()
+        .is_some_and(|extension| extension == "bin")
+    {
         let data =
             std::fs::read(source).with_context(|| format!("Cannot read {}", source.display()))?;
         let cleared = addressables::clear_binary_crcs(&data)?;
@@ -619,10 +658,10 @@ fn collect_not_baked(targets: &[(&Entry, &Place)], bakes: &[Bake]) -> IndexMap<S
         let lacking: String = done
             .baked
             .get("not_baked")
-            .and_then(|v| v.as_array())
+            .and_then(|value| value.as_array())
             .map_or(&[][..], Vec::as_slice)
             .iter()
-            .filter_map(|cp| cp.as_u64().and_then(|cp| u32::try_from(cp).ok()))
+            .filter_map(|value| value.as_u64().and_then(|code| u32::try_from(code).ok()))
             .filter_map(char::from_u32)
             .filter(|ch| added.contains(ch))
             .collect();
@@ -705,7 +744,10 @@ mod tests {
             kind: Kind::Legacy,
             ..entry("Roboto-14", "Roboto", "", &places)
         };
-        let (shared, notes) = share_family_sources(plan_of(vec![small, large, bold, legacy]));
+        let Shared {
+            plan: shared,
+            notes,
+        } = share_family_sources(plan_of(vec![small, large, bold, legacy]));
         assert_eq!(sources(&shared), ["Roboto.ttf", "Roboto.ttf", "", ""]);
         assert_eq!(
             notes,
@@ -723,9 +765,9 @@ mod tests {
         };
         let chosen = entry("Body 14 SDF", "Body", "Roboto.ttf", &places);
         let other = entry("Body 16 SDF", "Body", "Other.ttf", &places);
-        let (one, _) =
-            share_family_sources(plan_of(vec![suggested, chosen.clone(), empty.clone()]));
-        let (two, _) = share_family_sources(plan_of(vec![chosen, other, empty]));
+        let one =
+            share_family_sources(plan_of(vec![suggested, chosen.clone(), empty.clone()])).plan;
+        let two = share_family_sources(plan_of(vec![chosen, other, empty])).plan;
         assert_eq!(
             (one.fonts[2].source.as_str(), two.fonts[2].source.as_str()),
             ("Roboto.ttf", "")
@@ -758,7 +800,7 @@ mod tests {
     fn a_place_picks_its_own_serialized_file_inside_a_bundle() {
         let font = |cab: &str| LegacyFont {
             file: PathBuf::from("fonts"),
-            reference: (cab.to_string(), 7),
+            reference: (cab.to_string(), 7).into(),
             name: "Body".to_string(),
             data: b"x".to_vec(),
             os_names: Vec::new(),
@@ -780,7 +822,7 @@ mod tests {
                 find_legacy_font(&body, p, &scanned)
                     .unwrap()
                     .reference
-                    .0
+                    .serialized_file
                     .as_str()
             })
             .collect();

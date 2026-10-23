@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -7,33 +8,58 @@ use serde::{Deserialize, Serialize};
 use crate::downloads;
 use crate::fonts::charsets::Charset;
 use crate::fonts::{coverage, extract};
-use crate::game::folder::{self, Game};
+use crate::game::folder::{self, Game, ScanDepth};
 use crate::game::scan::{self, Ref, ScanResult};
 use crate::game::typetrees::{self, Generator};
 use crate::progress::{self, Progress, Report};
-use crate::work::plan::{self, Extracted};
+use crate::work::plan::{self, Extracted, Scanned};
 use crate::work::project::{self, Project};
 
-use super::GameState;
-use super::letters::{store_letters, to_charset};
-use super::state::{self, open_game_in, open_work};
-use super::{GameRecord, GameView, Letters};
+use super::state::{self, Saved};
+use super::{GameRecord, GameState, GameView, Letters, letters};
 
 const SCAN_FILE: &str = "scan.json";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ScanCache {
     result: ScanResult,
-    extracted: Vec<((PathBuf, Ref), String)>,
+    extracted: Vec<SavedFont>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+// scan.json keeps the old tuple shape, so caches from earlier versions still load.
+#[serde(from = "SavedFontWire", into = "SavedFontWire")]
+struct SavedFont {
+    file: PathBuf,
+    reference: Ref,
+    path: String,
+}
+
+type SavedFontWire = ((PathBuf, Ref), String);
+
+impl From<SavedFontWire> for SavedFont {
+    fn from(((file, reference), path): SavedFontWire) -> Self {
+        SavedFont {
+            file,
+            reference,
+            path,
+        }
+    }
+}
+
+impl From<SavedFont> for SavedFontWire {
+    fn from(font: SavedFont) -> Self {
+        ((font.file, font.reference), font.path)
+    }
 }
 
 pub fn scan(
     record: &GameRecord,
-    full: bool,
+    depth: ScanDepth,
     letters: &Letters,
     progress: Report,
 ) -> Result<GameView> {
-    scan_in(&downloads::find_home()?, record, full, letters, progress)
+    scan_in(&downloads::find_home()?, record, depth, letters, progress)
 }
 
 pub fn recheck(record: &GameRecord, letters: &Letters) -> Result<GameView> {
@@ -43,40 +69,37 @@ pub fn recheck(record: &GameRecord, letters: &Letters) -> Result<GameView> {
 pub(crate) fn scan_in(
     home: &Path,
     record: &GameRecord,
-    full: bool,
+    depth: ScanDepth,
     letters: &Letters,
     progress: Report,
 ) -> Result<GameView> {
-    let charset = to_charset(letters)?;
+    let charset = letters::to_charset(letters)?;
     let (game, work) = prepare(home, record)?;
     let generator = prepare_generator(&game, progress)?;
-    let listed = folder::list_asset_files(&game, full, progress)?;
+    let listed = folder::list_asset_files(&game, depth, progress)?;
     let files = add_known_font_files(listed, &game, &work)?;
     let result = scan_originals(&game, &work, &files, generator.as_ref(), progress);
     progress::check(progress, "Saving the fonts")?;
     let extracted = save_game_fonts(&result, &game, &work)?;
-    let cache = ScanCache {
-        extracted: extracted.into_iter().collect(),
-        result,
-    };
+    let cache = ScanCache { extracted, result };
     // The cache first: a plan is always rebuilt from it, never the other way round.
     state::write_json(&work.work.join(SCAN_FILE), &cache)?;
     write_plan(record, &game, &work, &cache, &charset)?;
     let saved = state::load_saved(&work)?;
     state::store_saved(
         &work,
-        &state::Saved {
+        &Saved {
             scan_errors: cache.result.errors.clone(),
             ..saved
         },
     )?;
-    open_game_in(home, record)
+    state::open_game_in(home, record)
 }
 
 pub(crate) fn recheck_in(home: &Path, record: &GameRecord, letters: &Letters) -> Result<GameView> {
-    let charset = to_charset(letters)?;
+    let charset = letters::to_charset(letters)?;
     let game = folder::locate(&record.folder)?;
-    let work = open_work(home, record)?;
+    let work = state::open_work(home, record)?;
     let path = work.work.join(SCAN_FILE);
     if !path.is_file() {
         bail!("No fonts read yet: run a scan first");
@@ -87,7 +110,7 @@ pub(crate) fn recheck_in(home: &Path, record: &GameRecord, letters: &Letters) ->
         serde_json::from_str(&text).with_context(|| format!("Cannot read {}", path.display()))?;
     load_saved_fonts(&mut cache, &work)?;
     write_plan(record, &game, &work, &cache, &charset)?;
-    open_game_in(home, record)
+    state::open_game_in(home, record)
 }
 
 pub(crate) fn has_scan_cache(work: &Project) -> bool {
@@ -96,7 +119,7 @@ pub(crate) fn has_scan_cache(work: &Project) -> bool {
 
 pub(crate) fn forget_scan(work: &Project) -> Result<()> {
     match std::fs::remove_file(work.work.join(SCAN_FILE)) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+        Err(error) if error.kind() != ErrorKind::NotFound => {
             Err(error).with_context(|| format!("Cannot delete {}", work.work.display()))
         }
         _ => Ok(()),
@@ -126,7 +149,7 @@ fn add_known_font_files(listed: Vec<PathBuf>, game: &Game, work: &Project) -> Re
 
 fn prepare(home: &Path, record: &GameRecord) -> Result<(Game, Project)> {
     let game = folder::locate(&record.folder)?;
-    let work = open_work(home, record)?;
+    let work = state::open_work(home, record)?;
     folder::reject_output_inside(&game.data_dir, &work.work)?;
     reject_updated(&work, &game)?;
     std::fs::create_dir_all(&work.work)
@@ -145,10 +168,19 @@ fn write_plan(
         true => Some(plan::load(&work.plan)?),
         false => None,
     };
-    let chars = store_letters(work, charset)?;
-    let extracted: Extracted = cache.extracted.iter().cloned().collect();
+    let chars = letters::store_letters(work, charset)?;
+    let extracted: Extracted = cache
+        .extracted
+        .iter()
+        .map(|font| {
+            (
+                (font.file.clone(), font.reference.clone()),
+                font.path.clone(),
+            )
+        })
+        .collect();
     let raw_note = typetrees::describe_raw_reading(game);
-    let scanned = plan::Scanned {
+    let scanned = Scanned {
         game_path: &record.folder,
         data_dir: &game.data_dir,
         extracted: &extracted,
@@ -156,7 +188,7 @@ fn write_plan(
         tmp: coverage::check_tmp_fonts(&cache.result, charset),
         legacy: coverage::check_legacy_fonts(&cache.result, charset),
     };
-    let made = plan::make_plan(scanned, charset, (&charset.name, chars.as_deref()));
+    let made = plan::make_plan(scanned, charset, &charset.name, chars.as_deref());
     let made = match &previous {
         Some(previous) => plan::keep_user_choices(made, previous),
         None => made,
@@ -166,14 +198,13 @@ fn write_plan(
 
 fn load_saved_fonts(cache: &mut ScanCache, work: &Project) -> Result<()> {
     let base = work.plan.parent().unwrap_or(Path::new("")).to_path_buf();
-    let paths: HashMap<&(PathBuf, Ref), &String> = cache
+    let paths: HashMap<(&PathBuf, &Ref), &String> = cache
         .extracted
         .iter()
-        .map(|(key, path)| (key, path))
+        .map(|saved| ((&saved.file, &saved.reference), &saved.path))
         .collect();
     for font in &mut cache.result.legacy {
-        let key = (font.file.clone(), font.reference.clone());
-        if let Some(relative) = paths.get(&key) {
+        if let Some(relative) = paths.get(&(&font.file, &font.reference)) {
             let path = base.join(relative);
             font.data =
                 std::fs::read(&path).with_context(|| format!("Cannot read {}", path.display()))?;
@@ -228,10 +259,11 @@ fn scan_originals(
         .collect();
     let raw_note = typetrees::describe_raw_reading(game);
     let result = scan::scan_files(&sources, generator, &raw_note, &homes, progress);
-    scan::relocate(result, &pairs.into_iter().collect())
+    let moves: HashMap<PathBuf, PathBuf> = pairs.into_iter().collect();
+    scan::relocate(result, &moves)
 }
 
-fn save_game_fonts(result: &ScanResult, game: &Game, work: &Project) -> Result<Extracted> {
+fn save_game_fonts(result: &ScanResult, game: &Game, work: &Project) -> Result<Vec<SavedFont>> {
     let saved = extract::plan_files(&result.legacy, &game.data_dir);
     extract::write_files(&saved, &work.fonts)?;
     let base = work.plan.parent().unwrap_or(Path::new(""));
@@ -241,7 +273,11 @@ fn save_game_fonts(result: &ScanResult, game: &Game, work: &Project) -> Result<E
             let path = work.fonts.join(item.path.as_ref()?);
             let relative = path.strip_prefix(base).ok()?;
             let text = folder::format_relative(relative, Path::new(""));
-            Some(((item.font.file.clone(), item.font.reference.clone()), text))
+            Some(SavedFont {
+                file: item.font.file.clone(),
+                reference: item.font.reference.clone(),
+                path: text,
+            })
         })
         .collect())
 }

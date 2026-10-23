@@ -1,7 +1,6 @@
 //! Built in its own project folder, so marking the same fonts again only copies the files.
 
-use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
@@ -14,24 +13,22 @@ use crate::work::build;
 use crate::work::plan::{self, Entry, Plan};
 use crate::work::project::{self, Project};
 
-use super::apply::{prepare_change, reject_unwritable, restore};
-use super::scanning::prepare_generator;
-use super::state::{self, Numbered, Saved, open_game_in, to_wanted};
-use super::{FontKey, GameView};
+use super::state::{self, Numbered, Saved, SourceFile, Wanted};
+use super::{FontKey, GameView, apply, scanning};
 
 const NUMBERS_DIR: &str = "numbers";
 const STAMP: &str = "stamp.json";
 
 /// The marked fonts draw their row numbers; the others keep what the game has, original or applied.
 pub fn mark_fonts(view: &GameView, marked: &[FontKey], progress: Report) -> Result<GameView> {
-    let (game, work) = prepare_change(view)?;
+    let (game, work) = apply::prepare_change(view)?;
     let Some(plan) = view.plan.as_ref() else {
         bail!("Scan the game first");
     };
     if marked.is_empty() {
         bail!("Pick at least one font to mark");
     }
-    reject_unwritable(&game.data_dir)?;
+    apply::reject_unwritable(&game.data_dir)?;
     let saved = state::load_saved(&work)?;
     let side = open_side_project(&work, NUMBERS_DIR)?;
     let numbered = number_fonts(plan, marked, &saved, &work, &side)?;
@@ -45,17 +42,17 @@ pub fn mark_fonts(view: &GameView, marked: &[FontKey], progress: Report) -> Resu
             ..saved
         },
     )?;
-    open_game_in(&view.home, &view.record)
+    state::open_game_in(&view.home, &view.record)
 }
 
 /// Puts back what the game had before the marks: the applied fonts, or the originals.
 pub fn unmark_fonts(view: &GameView) -> Result<GameView> {
-    let (game, work) = prepare_change(view)?;
+    let (game, work) = apply::prepare_change(view)?;
     let saved = state::load_saved(&work)?;
     if saved.applied.is_empty() {
-        return restore(view);
+        return apply::restore(view);
     }
-    reject_unwritable(&game.data_dir)?;
+    apply::reject_unwritable(&game.data_dir)?;
     project::install(&work, &game.data_dir)?;
     state::store_saved(
         &work,
@@ -64,7 +61,7 @@ pub fn unmark_fonts(view: &GameView) -> Result<GameView> {
             ..saved
         },
     )?;
-    open_game_in(&view.home, &view.record)
+    state::open_game_in(&view.home, &view.record)
 }
 
 fn build_once(numbered: &Plan, game: &Game, side: &Project, progress: Report) -> Result<()> {
@@ -94,7 +91,7 @@ fn build_once(numbered: &Plan, game: &Game, side: &Project, progress: Report) ->
     }
     project::write_text(&side.plan, &plan::to_json(numbered)?)?;
     let charset = plan::read_charset(numbered, &side.plan)?;
-    let generator = prepare_generator(game, progress)?;
+    let generator = scanning::prepare_generator(game, progress)?;
     let options = Options {
         raw_note: typetrees::describe_raw_reading(game),
     };
@@ -111,7 +108,7 @@ fn build_once(numbered: &Plan, game: &Game, side: &Project, progress: Report) ->
 }
 
 /// Where the marked build keeps its files, so an install of them stopped midway is recognised.
-pub(crate) fn marked_files(work: &Project) -> Result<std::path::PathBuf> {
+pub(crate) fn marked_files(work: &Project) -> Result<PathBuf> {
     Ok(open_side_project(work, NUMBERS_DIR)?.patched)
 }
 
@@ -140,36 +137,33 @@ fn number_fonts(
     let folder = side.work.join("fonts");
     std::fs::create_dir_all(&folder)
         .with_context(|| format!("Cannot create {}", folder.display()))?;
-    let applied: HashMap<FontKey, (String, String)> = to_wanted(&saved.applied);
-    let fonts = plan
-        .fonts
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| {
-            let key = FontKey::of(entry);
-            if marked.contains(&key) {
-                let path = folder.join(format!("{}.ttf", index + 1));
-                std::fs::write(&path, numbers::make_number_font(index + 1)?)
-                    .with_context(|| format!("Cannot write {}", path.display()))?;
-                return Ok(Entry {
-                    source: path.display().to_string(),
-                    skip: false,
-                    ..entry.clone()
-                });
-            }
-            Ok(match applied.get(&key) {
-                Some((source, _)) => Entry {
-                    source: source.clone(),
-                    skip: false,
-                    ..entry.clone()
-                },
-                None => Entry {
-                    skip: true,
-                    ..entry.clone()
-                },
-            })
-        })
-        .collect::<Result<Vec<Entry>>>()?;
+    let applied: Wanted = state::to_wanted(&saved.applied);
+    let mut fonts: Vec<Entry> = Vec::new();
+    for (index, entry) in plan.fonts.iter().enumerate() {
+        let key = FontKey::of(entry);
+        if marked.contains(&key) {
+            let path = folder.join(format!("{}.ttf", index + 1));
+            std::fs::write(&path, numbers::make_number_font(index + 1)?)
+                .with_context(|| format!("Cannot write {}", path.display()))?;
+            fonts.push(Entry {
+                source: path.display().to_string(),
+                skip: false,
+                ..entry.clone()
+            });
+            continue;
+        }
+        fonts.push(match applied.get(&key) {
+            Some(SourceFile { source, .. }) => Entry {
+                source: source.clone(),
+                skip: false,
+                ..entry.clone()
+            },
+            None => Entry {
+                skip: true,
+                ..entry.clone()
+            },
+        });
+    }
     let every: Vec<_> = fonts.iter().map(FontKey::of).collect();
     let chosen = Plan {
         fonts,
@@ -179,7 +173,7 @@ fn number_fonts(
 }
 
 fn select_fonts(plan: &Plan, plan_path: &Path, fonts: &[FontKey]) -> Plan {
-    let (shared, _) = build::share_family_sources(plan.clone());
+    let shared = build::share_family_sources(plan.clone()).plan;
     let base = plan_path.parent().unwrap_or(Path::new(""));
     let entries = shared
         .fonts

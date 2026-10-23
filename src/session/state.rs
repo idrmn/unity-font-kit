@@ -12,11 +12,53 @@ use crate::work::build;
 use crate::work::plan::{self, Entry, Kind, Plan};
 use crate::work::project::{self, Project};
 
-use super::letters::{read_letters, to_charset};
-use super::{FontKey, FontStatus, GameRecord, GameState, GameView, Letters, Replacement};
+use super::{FontKey, GameRecord, Letters, letters};
 
 const PROJECTS: &str = "projects";
 const STATE_FILE: &str = "state.json";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GameState {
+    Original,
+    Applied,
+    /// Files ufk installed changed since, usually by a game update.
+    Updated {
+        files: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FontStatus {
+    Unchanged,
+    Chosen,
+    Applied,
+    Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GameView {
+    pub record: GameRecord,
+    pub state: GameState,
+    pub plan: Option<Plan>,
+    pub statuses: HashMap<FontKey, FontStatus>,
+    pub notes: HashMap<FontKey, Vec<String>>,
+    pub replacements: HashMap<FontKey, Replacement>,
+    pub scan_errors: Vec<String>,
+    /// Letters can be checked against the last scan instead of reading the game again.
+    pub rechecks: bool,
+    /// The number each font draws in the game; empty when the game shows letters.
+    pub numbers: HashMap<FontKey, usize>,
+    pub letters: Letters,
+    /// The data folder this view was read from.
+    pub home: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Replacement {
+    pub path: PathBuf,
+    /// Letters and marks the file lacks; None when it cannot be read.
+    pub lacks: Option<String>,
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Saved {
@@ -34,7 +76,7 @@ pub(crate) struct Saved {
 impl Saved {
     /// New letters need new atlases, so the applied fonts no longer count as done.
     pub(crate) fn has_letters(&self, letters: &Letters) -> bool {
-        self.letters.is_empty() || self.letters == super::join_text(letters)
+        self.letters.is_empty() || self.letters == letters::join_text(letters)
     }
 }
 
@@ -64,7 +106,13 @@ pub(crate) struct FontResult {
     pub notes: Vec<String>,
 }
 
-pub(crate) type Wanted = HashMap<FontKey, (String, String)>;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SourceFile {
+    pub source: String,
+    pub hash: String,
+}
+
+pub(crate) type Wanted = HashMap<FontKey, SourceFile>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GameStatus {
@@ -75,6 +123,7 @@ pub enum GameStatus {
 }
 
 impl GameStatus {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             GameStatus::Original => "Original",
@@ -97,9 +146,11 @@ pub fn read_status(record: &GameRecord) -> GameStatus {
             false => Ok(GameStatus::Numbers),
         }
     };
+    // A game whose files cannot be read shows as Original; opening it reports why.
     read().unwrap_or(GameStatus::Original)
 }
 
+#[must_use]
 pub fn status_of(view: &GameView) -> GameStatus {
     match view.state {
         GameState::Updated { .. } => GameStatus::Updated,
@@ -137,7 +188,7 @@ pub(crate) fn open_game_in(home: &Path, record: &GameRecord) -> Result<GameView>
             .collect(),
         false => HashMap::new(),
     };
-    let letters = read_letters(plan.as_ref(), &work.plan)?;
+    let letters = letters::read_letters(plan.as_ref(), &work.plan)?;
     let view = GameView {
         record: record.clone(),
         state,
@@ -303,9 +354,9 @@ fn find_replacements(
     plan_path: &Path,
     letters: &Letters,
 ) -> HashMap<FontKey, Replacement> {
-    let charset = to_charset(letters).ok();
-    let (shared, _) = build::share_family_sources(plan.clone());
-    shared
+    let charset = letters::to_charset(letters).ok();
+    build::share_family_sources(plan.clone())
+        .plan
         .fonts
         .iter()
         .filter(|entry| !entry.skip && !entry.source.is_empty())
@@ -322,8 +373,8 @@ fn find_replacements(
 
 /// A missing source file gets an empty hash.
 pub(crate) fn list_wanted(plan: &Plan, plan_path: &Path) -> Wanted {
-    let (shared, _) = build::share_family_sources(plan.clone());
-    shared
+    build::share_family_sources(plan.clone())
+        .plan
         .fonts
         .iter()
         .filter(|entry| !entry.skip && !entry.source.is_empty())
@@ -331,7 +382,11 @@ pub(crate) fn list_wanted(plan: &Plan, plan_path: &Path) -> Wanted {
             let hash = build::resolve_source(entry, plan_path)
                 .and_then(|path| project::hash_file(&path))
                 .unwrap_or_default();
-            (FontKey::of(entry), (entry.source.clone(), hash))
+            let file = SourceFile {
+                source: entry.source.clone(),
+                hash,
+            };
+            (FontKey::of(entry), file)
         })
         .collect()
 }
@@ -374,7 +429,10 @@ pub(crate) fn to_wanted(choices: &[Choice]) -> Wanted {
                     font: choice.font.clone(),
                     family: choice.family.clone(),
                 },
-                (choice.source.clone(), choice.hash.clone()),
+                SourceFile {
+                    source: choice.source.clone(),
+                    hash: choice.hash.clone(),
+                },
             )
         })
         .collect()
@@ -383,13 +441,15 @@ pub(crate) fn to_wanted(choices: &[Choice]) -> Wanted {
 pub(crate) fn to_choices(wanted: &Wanted) -> Vec<Choice> {
     let mut choices: Vec<Choice> = wanted
         .iter()
-        .map(|(FontKey { kind, font, family }, (source, hash))| Choice {
-            kind: *kind,
-            font: font.clone(),
-            family: family.clone(),
-            source: source.clone(),
-            hash: hash.clone(),
-        })
+        .map(
+            |(FontKey { kind, font, family }, SourceFile { source, hash })| Choice {
+                kind: *kind,
+                font: font.clone(),
+                family: family.clone(),
+                source: source.clone(),
+                hash: hash.clone(),
+            },
+        )
         .collect();
     choices.sort_by(|a, b| (&a.font, &a.family).cmp(&(&b.font, &b.family)));
     choices
@@ -506,6 +566,14 @@ pub(crate) mod tests {
         }
     }
 
+    fn want(font: &str, source: &str, hash: &str) -> (FontKey, SourceFile) {
+        let file = SourceFile {
+            source: source.to_string(),
+            hash: hash.to_string(),
+        };
+        (key(font), file)
+    }
+
     fn choice(font: &str, source: &str, hash: &str) -> Choice {
         Choice {
             kind: Kind::Tmp,
@@ -527,10 +595,10 @@ pub(crate) mod tests {
             entry("Failed", "a.ttf", false),
         ]);
         let wanted: Wanted = [
-            (key("Same"), ("a.ttf".to_string(), "h1".to_string())),
-            (key("Edited"), ("a.ttf".to_string(), "h2".to_string())),
-            (key("Other"), ("b.ttf".to_string(), "h3".to_string())),
-            (key("Failed"), ("a.ttf".to_string(), "h1".to_string())),
+            want("Same", "a.ttf", "h1"),
+            want("Edited", "a.ttf", "h2"),
+            want("Other", "b.ttf", "h3"),
+            want("Failed", "a.ttf", "h1"),
         ]
         .into();
         let saved = Saved {
@@ -570,10 +638,10 @@ pub(crate) mod tests {
 
     #[test]
     fn applied_fonts_need_a_new_apply_after_the_letters_change() {
-        let uk = super::super::letters_from_preset("uk").unwrap();
-        let pl = super::super::letters_from_preset("pl").unwrap();
+        let uk = letters::letters_from_preset("uk").unwrap();
+        let pl = letters::letters_from_preset("pl").unwrap();
         let saved = Saved {
-            letters: super::super::join_text(&uk),
+            letters: letters::join_text(&uk),
             ..Saved::default()
         };
         assert!(saved.has_letters(&uk));

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
@@ -11,6 +10,7 @@ pub const SETTINGS: &str = "StreamingAssets/aa/settings.json";
 pub const BUNDLES: &str = "StreamingAssets/aa/";
 const RUNTIME_PATH: &str = "{UnityEngine.AddressableAssets.Addressables.RuntimePath}/";
 /// Install changes catalogs before bundles and restore after them, so the game never checks a changed bundle's CRC.
+#[must_use]
 pub fn is_catalog_file(file: &str) -> bool {
     let name = file.rsplit('/').next().unwrap_or(file).to_lowercase();
     name.starts_with("catalog") && (name.ends_with(".json") || name.ends_with(".bin"))
@@ -31,7 +31,7 @@ pub struct Catalogs {
 }
 
 pub fn list_catalogs(settings: &str) -> Result<Catalogs> {
-    let parsed = serde_json::from_str::<Value>(settings)?;
+    let parsed: Value = serde_json::from_str(settings)?;
     let Value::Object(fields) = parsed else {
         bail!("{SETTINGS} is not a JSON object");
     };
@@ -89,11 +89,13 @@ fn read_text(value: Option<&Value>) -> Result<&str> {
     }
 }
 
+#[must_use]
 pub fn touches_bundles(files: &[String]) -> bool {
     files.iter().any(|file| file.starts_with(BUNDLES))
 }
 
 pub fn clear_crcs(catalog: &str) -> Result<String> {
+    use base64::Engine;
     let extra = read_extra_data(catalog)?;
     if !catalog.contains(&extra) {
         bail!("{JSON_CATALOG} is written in a way ufk cannot update");
@@ -105,7 +107,7 @@ pub fn clear_crcs(catalog: &str) -> Result<String> {
 }
 
 fn read_extra_data(catalog: &str) -> Result<String> {
-    let parsed = serde_json::from_str::<Value>(catalog)?;
+    let parsed: Value = serde_json::from_str(catalog)?;
     match parsed.get("m_ExtraDataString") {
         Some(Value::String(extra)) => Ok(extra.clone()),
         _ => bail!("{JSON_CATALOG} has no m_ExtraDataString text"),
@@ -293,8 +295,10 @@ fn decode_utf16_lossy(text: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use base64::Engine;
     use serde_json::json;
+
+    use super::*;
 
     fn pack(values: &[u32]) -> Vec<u8> {
         values

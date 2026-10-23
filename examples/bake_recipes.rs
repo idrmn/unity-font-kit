@@ -15,12 +15,12 @@ fn main() -> Result<()> {
         let recipe_path = Path::new(parts.next().context("recipe")?);
         let version = parts.next().context("version")?;
         let font = std::fs::read(parts.next().context("font")?)?;
-        let mut rec = recipe::load(recipe_path)?;
-        rec.unity_version = version.to_string();
-        let baked = bake::bake(&rec, &font)?;
+        let mut recipe = recipe::load(recipe_path)?;
+        recipe.unity_version = version.to_string();
+        let baked = bake::bake(&recipe, &font)?;
         let digest: String = Sha256::digest(&baked.atlas.data)
             .iter()
-            .map(|b| format!("{b:02x}"))
+            .map(|byte| format!("{byte:02x}"))
             .collect();
         let name = recipe_path.file_name().context("name")?.to_string_lossy();
         println!(

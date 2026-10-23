@@ -6,19 +6,24 @@ use anyhow::{Context, Result, bail};
 
 use crate::downloads;
 use crate::game::folder::Game;
-use crate::game::typetrees::has_dlls;
+use crate::game::typetrees;
 
 pub const CPP2IL_VERSION: &str = "2022.1.0-pre-release.21";
 const RELEASES: &str = "https://github.com/SamboyCoding/Cpp2IL/releases/download";
-const CPP2IL_WINDOWS: (&str, &str) = (
-    "Windows.exe",
-    "663fb432433b4371fd1ee0ebc321a8fff2a9aac5ac4230c843f9e03ddee4e04c",
-);
-const CPP2IL_LINUX: (&str, &str) = (
-    "Linux",
-    "526998e593c52c029c5a6215c5c6c9f9d963706bfc409fc9ff80a95c4c500349",
-);
+const CPP2IL_WINDOWS: Release = Release {
+    platform: "Windows.exe",
+    sha256: "663fb432433b4371fd1ee0ebc321a8fff2a9aac5ac4230c843f9e03ddee4e04c",
+};
+const CPP2IL_LINUX: Release = Release {
+    platform: "Linux",
+    sha256: "526998e593c52c029c5a6215c5c6c9f9d963706bfc409fc9ff80a95c4c500349",
+};
 pub const DONE: &str = "ufk-done.txt";
+
+struct Release {
+    platform: &'static str,
+    sha256: &'static str,
+}
 
 pub fn find_binary(game_dir: &Path) -> Result<PathBuf> {
     ["GameAssembly.dll", "GameAssembly.so"]
@@ -50,7 +55,7 @@ pub fn find_metadata(data_dir: &Path) -> Result<PathBuf> {
 pub fn find_dll_dir(game: &Game) -> Result<PathBuf> {
     let game_dir = game.data_dir.parent().unwrap_or(&game.data_dir);
     let (binary, metadata) = (find_binary(game_dir)?, find_metadata(&game.data_dir)?);
-    let hash = downloads::hash_files(&[binary.clone(), metadata.clone()])?;
+    let hash = downloads::hash_files(&[&binary, &metadata])?;
     let out = downloads::find_home()?.join("il2cpp").join(&hash[..16]);
     if !out.join(DONE).is_file() {
         let tool = fetch_cpp2il()?;
@@ -92,7 +97,7 @@ fn run_cpp2il(
         .arg(format!("--output-to={}", target.display()))
         .output()
         .with_context(|| format!("Cannot run {}", tool.display()))?;
-    if output.status.success() && has_dlls(target) {
+    if output.status.success() && typetrees::has_dlls(target) {
         return Ok(());
     }
     let text = String::from_utf8_lossy(&output.stdout) + String::from_utf8_lossy(&output.stderr);
@@ -115,18 +120,18 @@ fn publish_dir(partial: &Path, out: &Path) -> Result<()> {
 }
 
 fn fetch_cpp2il() -> Result<PathBuf> {
-    let (platform, sha256) = match (std::env::consts::OS, std::env::consts::ARCH) {
+    let release = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => CPP2IL_WINDOWS,
         ("linux", "x86_64") => CPP2IL_LINUX,
         (os, arch) => {
             bail!("Reading IL2CPP games works on 64-bit Windows and Linux, not {os} {arch}")
         }
     };
-    let name = format!("Cpp2IL-{CPP2IL_VERSION}-{platform}");
+    let name = format!("Cpp2IL-{CPP2IL_VERSION}-{}", release.platform);
     let target = downloads::find_home()?.join("cpp2il").join(&name);
     downloads::fetch(
         &format!("{RELEASES}/{CPP2IL_VERSION}/{name}"),
-        sha256,
+        release.sha256,
         &target,
         "it reads the code of IL2CPP games",
     )

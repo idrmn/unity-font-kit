@@ -14,6 +14,7 @@ pub struct Charset {
 }
 
 impl Charset {
+    #[must_use]
     pub fn all(&self) -> String {
         format!("{}{}", self.letters, self.typography)
     }
@@ -98,6 +99,7 @@ fn split_at_blank_line(text: &str) -> (&str, &str) {
     (text, "")
 }
 
+#[must_use]
 pub fn collect_chars(text: &str) -> String {
     let mut seen = HashSet::new();
     text.chars()
@@ -109,6 +111,7 @@ fn is_space(ch: char) -> bool {
     ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch)
 }
 
+#[must_use]
 pub fn find_missing(have: &HashSet<u32>, wanted: &str) -> String {
     wanted
         .chars()
@@ -116,6 +119,7 @@ pub fn find_missing(have: &HashSet<u32>, wanted: &str) -> String {
         .collect()
 }
 
+#[must_use]
 pub fn format_chars(chars: &str) -> String {
     chars
         .chars()

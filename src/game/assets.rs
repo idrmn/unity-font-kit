@@ -10,12 +10,10 @@ use anyhow::{Context, Result, bail};
 use rabex::UnityVersion;
 use rabex::files::SerializedFile;
 use rabex::files::bundlefile::{
-    BundleFileHeader, BundleFileReader, CompressionType, ExtractionConfig, write_bundle,
+    self, BundleFileHeader, BundleFileReader, CompressionType, ExtractionConfig,
 };
 use rabex::files::rawbundle;
-use rabex::files::serializedfile::{
-    ObjectInfo, build_common_offset_map, write_serialized_with_objects,
-};
+use rabex::files::serializedfile::{self, ObjectInfo};
 use rabex::files::unityfile::FileEntry;
 use rabex::objects::ClassId;
 use rabex::serde_typetree;
@@ -24,11 +22,11 @@ use rabex::typetree::typetree_cache::sync::TypeTreeCache;
 use rabex::typetree::{NullTypeTreeProvider, TypeTreeNode, TypeTreeProvider};
 use serde_json::Value;
 
-use crate::game::folder::{NOT_SERIALIZED, is_asset_head};
+use crate::game::folder::{self, NOT_SERIALIZED};
+use crate::game::scan::Ref;
 
 pub type Tpk = TypeTreeCache<TpkTypeTreeBlob>;
-/// Keyed by (serialized file name, path id).
-pub type Changed = HashMap<(String, i64), Vec<u8>>;
+pub type Changed = HashMap<Ref, Vec<u8>>;
 
 const COMPRESSION_MASK: u32 = 0x3f;
 
@@ -47,8 +45,8 @@ pub struct Script {
 
 pub struct Source {
     pub units: Vec<Rc<Unit>>,
-    entries: Vec<(String, Option<Rc<Unit>>)>,
-    resources: Vec<(String, Vec<u8>)>,
+    entries: Vec<Entry>,
+    resources: Vec<Resource>,
     deferred: Vec<String>,
     path: PathBuf,
     dir: PathBuf,
@@ -56,9 +54,35 @@ pub struct Source {
     walked: RefCell<Option<Vec<PathBuf>>>,
 }
 
+struct Entry {
+    path: String,
+    unit: Option<Rc<Unit>>,
+}
+
+struct Resource {
+    path: String,
+    data: Vec<u8>,
+}
+
+#[derive(Default)]
+struct Entries {
+    entries: Vec<Entry>,
+    resources: Vec<Resource>,
+    deferred: Vec<String>,
+}
+
+struct Split {
+    entry: Entry,
+    resource: Option<Resource>,
+}
+
 /// `home` replaces the file's own folder when externals are looked up (a backup copy outside the game).
 pub fn open(path: &Path, home: Option<&Path>) -> Result<Source> {
-    let (entries, resources, deferred) = match is_unityfs(path)? {
+    let Entries {
+        entries,
+        resources,
+        deferred,
+    } = match is_unityfs(path)? {
         true => read_bundle(path)?,
         false => {
             let bytes =
@@ -68,7 +92,7 @@ pub fn open(path: &Path, home: Option<&Path>) -> Result<Source> {
     };
     let units = entries
         .iter()
-        .filter_map(|(_, unit)| unit.clone())
+        .filter_map(|entry| entry.unit.clone())
         .collect();
     let dir = match home {
         Some(home) => home.to_path_buf(),
@@ -86,12 +110,6 @@ pub fn open(path: &Path, home: Option<&Path>) -> Result<Source> {
     })
 }
 
-type Entries = (
-    Vec<(String, Option<Rc<Unit>>)>,
-    Vec<(String, Vec<u8>)>,
-    Vec<String>,
-);
-
 fn is_unityfs(path: &Path) -> Result<bool> {
     let mut head = [0; 8];
     let file = File::open(path).with_context(|| format!("Cannot read {}", path.display()))?;
@@ -104,40 +122,56 @@ fn read_entries(bytes: Vec<u8>, name: &str) -> Result<Entries> {
         return read_raw_bundle(&bytes);
     }
     let length = bytes.len() as u64;
-    if !is_asset_head(&bytes[..bytes.len().min(48)], length) {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+    if !folder::is_asset_head(&bytes[..bytes.len().min(48)], length) {
+        return Ok(Entries::default());
     }
     let unit = read_unit(name.to_string(), bytes, None)?;
-    Ok((
-        vec![(name.to_string(), Some(Rc::new(unit)))],
-        Vec::new(),
-        Vec::new(),
-    ))
+    Ok(Entries {
+        entries: vec![Entry {
+            path: name.to_string(),
+            unit: Some(Rc::new(unit)),
+        }],
+        ..Entries::default()
+    })
 }
 
 fn read_raw_bundle(bytes: &[u8]) -> Result<Entries> {
     let bundle = rawbundle::read_raw_bundle(bytes)?;
-    let engine = bundle.header.engine_version.parse::<UnityVersion>().ok();
+    let engine: Option<UnityVersion> = bundle.header.engine_version.parse().ok();
     let mut entries = Vec::new();
     let mut resources = Vec::new();
     for (path, data) in bundle.files {
-        let (entry, resource) = split_entry(path, data, engine.clone())?;
-        entries.push(entry);
-        resources.extend(resource);
+        let split = split_entry(path, data, engine.clone())?;
+        entries.push(split.entry);
+        resources.extend(split.resource);
     }
-    Ok((entries, resources, Vec::new()))
+    Ok(Entries {
+        entries,
+        resources,
+        deferred: Vec::new(),
+    })
 }
-
-type Split = ((String, Option<Rc<Unit>>), Option<(String, Vec<u8>)>);
 
 fn split_entry(path: String, data: Vec<u8>, engine: Option<UnityVersion>) -> Result<Split> {
     let serialized = !NOT_SERIALIZED.iter().any(|suffix| path.ends_with(suffix))
-        && is_asset_head(&data[..data.len().min(48)], data.len() as u64);
+        && folder::is_asset_head(&data[..data.len().min(48)], data.len() as u64);
     if !serialized {
-        return Ok(((path.clone(), None), Some((path, data))));
+        return Ok(Split {
+            entry: Entry {
+                path: path.clone(),
+                unit: None,
+            },
+            resource: Some(Resource { path, data }),
+        });
     }
     let unit = read_unit(base_name(&path), data, engine)?;
-    Ok(((path, Some(Rc::new(unit))), None))
+    Ok(Split {
+        entry: Entry {
+            path,
+            unit: Some(Rc::new(unit)),
+        },
+        resource: None,
+    })
 }
 
 fn read_bundle(path: &Path) -> Result<Entries> {
@@ -151,16 +185,23 @@ fn read_bundle(path: &Path) -> Result<Entries> {
     while let Some(mut entry) = bundle.next() {
         let path = entry.path.clone();
         if NOT_SERIALIZED.iter().any(|suffix| path.ends_with(suffix)) {
-            entries.push((path.clone(), None));
+            entries.push(Entry {
+                path: path.clone(),
+                unit: None,
+            });
             deferred.push(path);
             continue;
         }
         let data = entry.read_owned()?;
-        let (entry, resource) = split_entry(path, data, engine.clone())?;
-        entries.push(entry);
-        resources.extend(resource);
+        let split = split_entry(path, data, engine.clone())?;
+        entries.push(split.entry);
+        resources.extend(split.resource);
     }
-    Ok((entries, resources, deferred))
+    Ok(Entries {
+        entries,
+        resources,
+        deferred,
+    })
 }
 
 fn read_deferred(path: &Path, entry: &str) -> Result<Vec<u8>> {
@@ -186,6 +227,7 @@ fn read_unit(name: String, data: Vec<u8>, engine: Option<UnityVersion>) -> Resul
     })
 }
 
+#[must_use]
 pub fn node_for<'a>(
     unit: &'a Unit,
     info: &ObjectInfo,
@@ -197,28 +239,31 @@ pub fn node_for<'a>(
     tpk_node(unit, info.m_ClassID, tpk)
 }
 
+#[must_use]
 pub fn has_embedded_node(unit: &Unit, info: &ObjectInfo) -> bool {
     unit.file
         .get_typetree_for(info, &NullTypeTreeProvider)
         .is_ok()
 }
 
+#[must_use]
 pub fn tpk_node<'a>(unit: &Unit, class: ClassId, tpk: &'a Tpk) -> Option<Cow<'a, TypeTreeNode>> {
     tpk.get_typetree_node(class, unit.version.as_ref()?)
 }
 
-/// `exact` rejects a node that does not cover every byte.
-pub fn read_value(
-    unit: &Unit,
-    info: &ObjectInfo,
-    node: &TypeTreeNode,
-    exact: bool,
-) -> Result<Value> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    Exact,
+    Prefix,
+}
+
+/// `Fit::Exact` rejects a node that does not cover every byte.
+pub fn read_value(unit: &Unit, info: &ObjectInfo, node: &TypeTreeNode, fit: Fit) -> Result<Value> {
     let data = raw_data(unit, info)?;
     let mut reader = Cursor::new(data);
     let value: Value =
         serde_typetree::from_reader_endianed(&mut reader, node, unit.file.m_Header.m_Endianess)?;
-    if exact && reader.position() != data.len() as u64 {
+    if fit == Fit::Exact && reader.position() != data.len() as u64 {
         bail!(
             "Expected to read {} bytes, but only read {} bytes",
             data.len(),
@@ -229,6 +274,7 @@ pub fn read_value(
 }
 
 /// A byte list as read: one base64 string from rabex, or numbers in hand-made trees.
+#[must_use]
 pub fn read_bytes(value: Option<&Value>) -> Vec<u8> {
     match value {
         Some(Value::String(text)) => serde_typetree::decode_bytes(text)
@@ -242,6 +288,7 @@ pub fn read_bytes(value: Option<&Value>) -> Vec<u8> {
     }
 }
 
+#[must_use]
 pub fn bytes_value(data: &[u8]) -> Value {
     Value::String(serde_typetree::encode_bytes(data))
 }
@@ -255,10 +302,11 @@ pub fn raw_data<'a>(unit: &'a Unit, info: &ObjectInfo) -> Result<&'a [u8]> {
 
 pub fn read_head(unit: &Unit, info: &ObjectInfo, tpk: &Tpk) -> Result<Value> {
     let node = tpk_node(unit, ClassId::MonoBehaviour, tpk).context("no MonoBehaviour typetree")?;
-    read_value(unit, info, &node, false)
+    read_value(unit, info, &node, Fit::Prefix)
 }
 
 impl Source {
+    #[must_use]
     pub fn follow(&self, unit: &Rc<Unit>, pptr: &Value) -> Option<(Rc<Unit>, i64)> {
         let (file_id, path_id) = (int_field(pptr, "m_FileID"), int_field(pptr, "m_PathID"));
         if path_id == 0 {
@@ -274,11 +322,12 @@ impl Source {
         Some((self.find_external(&external.pathName)?, path_id))
     }
 
+    #[must_use]
     pub fn read_script(&self, unit: &Rc<Unit>, head: &Value, tpk: &Tpk) -> Option<Script> {
         let (target, path_id) = self.follow(unit, head.get("m_Script")?)?;
         let info = target.file.get_object_info(path_id)?;
         let node = node_for(&target, info, tpk)?;
-        let script = read_value(&target, info, &node, true).ok()?;
+        let script = read_value(&target, info, &node, Fit::Exact).ok()?;
         let text = |key: &str| script.get(key)?.as_str().map(str::to_string);
         Some(Script {
             class: text("m_ClassName")?,
@@ -328,8 +377,8 @@ impl Source {
         names.iter().find_map(|name| {
             self.resources
                 .iter()
-                .find(|(path, _)| base_name(path).to_lowercase() == name.to_lowercase())
-                .map(|(_, data)| data.as_slice())
+                .find(|resource| base_name(&resource.path).to_lowercase() == name.to_lowercase())
+                .map(|resource| resource.data.as_slice())
         })
     }
 
@@ -356,12 +405,12 @@ impl Source {
 
     fn find_external(&self, path: &str) -> Option<Rc<Unit>> {
         let clean = clean_external(path);
-        if let Some((_, unit)) = self
+        if let Some(entry) = self
             .entries
             .iter()
-            .find(|(name, _)| name.to_lowercase() == clean)
+            .find(|entry| entry.path.to_lowercase() == clean)
         {
-            return unit.clone();
+            return entry.unit.clone();
         }
         if let Some(found) = self.loaded.borrow().get(&clean) {
             return found.clone();
@@ -400,7 +449,7 @@ impl Source {
 /// Bundles and non-serialized dependencies hold no objects to read.
 fn load_unit(path: &Path, name: &str) -> Option<Rc<Unit>> {
     let bytes = std::fs::read(path).ok()?;
-    if !is_asset_head(&bytes[..bytes.len().min(48)], bytes.len() as u64)
+    if !folder::is_asset_head(&bytes[..bytes.len().min(48)], bytes.len() as u64)
         || bytes.starts_with(b"UnityFS\0")
     {
         return None;
@@ -462,7 +511,7 @@ fn save_bundle(bytes: Vec<u8>, changed: &Changed, out: &mut (impl Write + Seek))
     for entry in bundle.files() {
         let before = bundle.read_at_entry(entry)?;
         let name = base_name(&entry.path);
-        let touched = changed.keys().any(|(file, _)| *file == name);
+        let touched = changed.keys().any(|key| key.serialized_file == name);
         let after = match touched {
             true => {
                 let mut rewritten = Cursor::new(Vec::new());
@@ -479,19 +528,19 @@ fn save_bundle(bytes: Vec<u8>, changed: &Changed, out: &mut (impl Write + Seek))
         });
         data.extend(after);
     }
-    write_bundle(&header, out, compression, compression, &entries, &data)?;
+    bundlefile::write_bundle(&header, out, compression, compression, &entries, &data)?;
     Ok(())
 }
 
 fn save_raw_bundle(bytes: &[u8], changed: &Changed) -> Result<Vec<u8>> {
     let bundle = rawbundle::read_raw_bundle(bytes)?;
-    let engine = bundle.header.engine_version.parse::<UnityVersion>().ok();
+    let engine: Option<UnityVersion> = bundle.header.engine_version.parse().ok();
     let files = bundle
         .files
         .into_iter()
         .map(|(path, data)| {
             let name = base_name(&path);
-            if !changed.keys().any(|(file, _)| *file == name) {
+            if !changed.keys().any(|key| key.serialized_file == name) {
                 return Ok((path, data));
             }
             let mut rewritten = Cursor::new(Vec::new());
@@ -518,23 +567,24 @@ fn write_serialized(
     let objects = file
         .objects()
         .map(|info| {
-            let data = match changed.get(&(name.to_string(), info.m_PathID)) {
-                Some(new) => Cow::Owned(new.clone()),
+            let data: &[u8] = match changed.get(&Ref {
+                serialized_file: name.to_string(),
+                path_id: info.m_PathID,
+            }) {
+                Some(new) => new,
                 None => {
                     let start = usize::try_from(info.m_Offset)?;
-                    Cow::Borrowed(
-                        bytes
-                            .get(start..start + info.m_Size as usize)
-                            .context("object data is outside the file")?,
-                    )
+                    bytes
+                        .get(start..start + info.m_Size as usize)
+                        .context("object data is outside the file")?
                 }
             };
-            Ok((info.clone(), data))
+            Ok((info.clone(), Cow::Borrowed(data)))
         })
         .collect::<Result<Vec<_>>>()?;
     let blob = TpkTypeTreeBlob::embedded();
-    let offsets = build_common_offset_map(&blob, &version);
-    write_serialized_with_objects(out, &file, &offsets, objects.into_iter())?;
+    let offsets = serializedfile::build_common_offset_map(&blob, &version);
+    serializedfile::write_serialized_with_objects(out, &file, &offsets, objects.into_iter())?;
     Ok(())
 }
 
@@ -551,6 +601,7 @@ fn find_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
         .find(|path| path.is_file() && file_name(path).to_lowercase() == name.to_lowercase())
 }
 
+#[must_use]
 pub fn int_field(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
 }

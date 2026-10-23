@@ -1,8 +1,10 @@
+use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use crate::progress::{self, Report};
 use rabex::files::bundlefile::{BundleFileReader, ExtractionConfig};
@@ -44,14 +46,20 @@ const SKIP_SUFFIXES: [&str; 22] = [
 pub(crate) const NOT_SERIALIZED: [&str; 5] = [".resS", ".resource", ".config", ".xml", ".dat"];
 const DEFAULT_VERSION: &str = "2.5.0f5";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScanDepth {
+    Fast,
+    Deep,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Backend {
     Mono,
     Il2cpp,
 }
 
-impl std::fmt::Display for Backend {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Backend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Mono => "Mono",
             Self::Il2cpp => "IL2CPP",
@@ -67,6 +75,7 @@ pub struct Game {
 }
 
 impl Game {
+    #[must_use]
     pub fn managed_dir(&self) -> PathBuf {
         self.data_dir.join(MANAGED)
     }
@@ -81,6 +90,7 @@ pub fn locate(path: &Path) -> Result<Game> {
     })
 }
 
+#[must_use]
 pub fn resolve(path: &Path) -> PathBuf {
     dunce::canonicalize(path)
         .or_else(|_| std::path::absolute(path))
@@ -106,10 +116,12 @@ pub fn find_data_dir(path: &Path) -> Result<PathBuf> {
         })
 }
 
+#[must_use]
 pub fn is_data_dir(path: &Path) -> bool {
     path.is_dir() && MARKERS.iter().any(|marker| path.join(marker).is_file())
 }
 
+#[must_use]
 pub fn detect_backend(data_dir: &Path) -> Backend {
     let game_dir = data_dir.parent().unwrap_or(data_dir);
     if game_dir.join("GameAssembly.dll").exists() || data_dir.join("il2cpp_data").is_dir() {
@@ -118,17 +130,17 @@ pub fn detect_backend(data_dir: &Path) -> Backend {
     Backend::Mono
 }
 
-pub fn list_asset_files(game: &Game, full: bool, report: Report) -> Result<Vec<PathBuf>> {
+pub fn list_asset_files(game: &Game, depth: ScanDepth, report: Report) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for path in list_sorted(&game.data_dir)? {
-        if path.is_file() && is_top_level(&path, full)? {
+        if path.is_file() && is_top_level(&path, depth)? {
             files.push(path);
         }
     }
     let mut nested = Vec::new();
     walk(&game.data_dir, &mut nested)?;
     sort_paths(&mut nested);
-    nested.retain(|path| is_bundle_candidate(path, &game.data_dir, full));
+    nested.retain(|path| is_bundle_candidate(path, &game.data_dir, depth));
     for path in progress::track(&nested, LISTING, |path| file_name(path), report) {
         if is_unity_file(path)? {
             files.push(path.clone());
@@ -146,28 +158,30 @@ fn is_named_like_font(path: &Path, data_dir: &Path) -> bool {
         .contains("font")
 }
 
-fn is_top_level(path: &Path, full: bool) -> Result<bool> {
+fn is_top_level(path: &Path, depth: ScanDepth) -> Result<bool> {
     let name = file_name(path);
     if is_top_level_name(&name) {
         return Ok(true);
     }
     if is_scene_name(&name) {
-        return Ok(full);
+        return Ok(depth == ScanDepth::Deep);
     }
-    if is_skipped(path) || (!full && !name.to_lowercase().contains("font")) {
+    if is_skipped(path) || (depth == ScanDepth::Fast && !name.to_lowercase().contains("font")) {
         return Ok(false);
     }
     is_unity_file(path)
 }
 
-fn is_bundle_candidate(path: &Path, data_dir: &Path, full: bool) -> bool {
+fn is_bundle_candidate(path: &Path, data_dir: &Path, depth: ScanDepth) -> bool {
     if path.parent() == Some(data_dir) || !path.is_file() || is_skipped(path) {
         return false;
     }
     if path.starts_with(data_dir.join(MANAGED)) || path.starts_with(data_dir.join("il2cpp_data")) {
         return false;
     }
-    full || is_top_level_name(&file_name(path)) || is_named_like_font(path, data_dir)
+    depth == ScanDepth::Deep
+        || is_top_level_name(&file_name(path))
+        || is_named_like_font(path, data_dir)
 }
 
 /// Scene files (levelN) hold scene objects; the fonts they use are serialized into sharedassetsN.
@@ -211,6 +225,7 @@ pub fn is_unity_file(path: &Path) -> Result<bool> {
 }
 
 /// Gzipped web files are not detected.
+#[must_use]
 pub(crate) fn is_asset_head(head: &[u8], length: u64) -> bool {
     if length < 20 {
         return false;
@@ -303,7 +318,7 @@ fn read_bundle_version(reader: impl Read + Seek) -> Result<Option<String>> {
         if !is_asset_head(&data[..data.len().min(48)], length) {
             continue;
         }
-        if let Some(version) = read_serialized_version(&mut std::io::Cursor::new(data))? {
+        if let Some(version) = read_serialized_version(&mut Cursor::new(data))? {
             return Ok(Some(version));
         }
     }
@@ -342,6 +357,7 @@ pub fn reject_output_inside(data_dir: &Path, out_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[must_use]
 pub fn format_relative(path: &Path, root: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(relative) => relative
@@ -449,7 +465,7 @@ mod tests {
         assert_eq!(found.backend, Backend::Il2cpp);
         assert_eq!(
             names(
-                &list_asset_files(&found, true, &progress::silent).unwrap(),
+                &list_asset_files(&found, ScanDepth::Deep, &progress::silent).unwrap(),
                 &found.data_dir
             ),
             [
@@ -469,7 +485,7 @@ mod tests {
     fn quick_reading_keeps_main_files_and_font_bundles() {
         let root = tempfile::tempdir().unwrap();
         let found = make_game(root.path());
-        let quick = list_asset_files(&found, false, &progress::silent).unwrap();
+        let quick = list_asset_files(&found, ScanDepth::Fast, &progress::silent).unwrap();
         assert_eq!(
             names(&quick, &found.data_dir),
             [

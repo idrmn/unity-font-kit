@@ -103,6 +103,19 @@ pub struct Candidate {
     pub marks: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Suggestion {
+    pub source: String,
+    pub note: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SkippedRow {
+    font: String,
+    reason: String,
+    file: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct Need {
     kind: Kind,
@@ -133,6 +146,7 @@ impl Lacking<'_> {
     }
 }
 
+#[must_use]
 pub fn normalize(name: &str) -> String {
     let kept: String = name
         .to_lowercase()
@@ -163,19 +177,20 @@ fn is_alpha(ch: char) -> bool {
 }
 
 /// `NotoSansCJK3` gives noto, sans, cjk, 3: script hints hide inside camel-case names.
+#[must_use]
 pub fn split_words(name: &str) -> Vec<String> {
     let chars: Vec<char> = name.replace("CJK", " CJK ").chars().collect();
     let mut words = Vec::new();
-    let mut idx = 0;
-    while idx < chars.len() {
-        let length = match_word(&chars[idx..]);
+    let mut index = 0;
+    while index < chars.len() {
+        let length = match_word(&chars[index..]);
         if length == 0 {
-            idx += 1;
+            index += 1;
             continue;
         }
-        let word: String = chars[idx..idx + length].iter().collect();
+        let word: String = chars[index..index + length].iter().collect();
         words.push(word.to_lowercase());
-        idx += length;
+        index += length;
     }
     words
 }
@@ -202,6 +217,7 @@ fn match_word(chars: &[char]) -> usize {
     count(|ch| get_general_category(*ch) == G::DecimalNumber, 0)
 }
 
+#[must_use]
 pub fn script_of(codepoint: u32) -> String {
     let name = char::from_u32(codepoint)
         .and_then(unicode_names2::name)
@@ -222,6 +238,7 @@ fn find_hinted_scripts(names: &[&str]) -> HashSet<&'static str> {
         .collect()
 }
 
+#[must_use]
 pub fn is_other_script(
     names: &[&str],
     codepoints: impl IntoIterator<Item = u32>,
@@ -239,16 +256,17 @@ pub fn is_other_script(
     }
     let (inside, total) = codepoints
         .into_iter()
-        .filter(|cp| char::from_u32(*cp).is_some_and(is_alpha))
-        .fold((0, 0), |(inside, total), cp| {
+        .filter(|codepoint| char::from_u32(*codepoint).is_some_and(is_alpha))
+        .fold((0, 0), |(inside, total), codepoint| {
             (
-                inside + usize::from(wanted.contains(&script_of(cp))),
+                inside + usize::from(wanted.contains(&script_of(codepoint))),
                 total + 1,
             )
         });
     total - inside > inside
 }
 
+#[must_use]
 pub fn is_tmp_other_script(item: &TmpCoverage, charset: &Charset) -> bool {
     let family = item.font.family.as_deref().unwrap_or("");
     is_other_script(
@@ -258,6 +276,7 @@ pub fn is_tmp_other_script(item: &TmpCoverage, charset: &Charset) -> bool {
     )
 }
 
+#[must_use]
 pub fn is_legacy_other_script(item: &LegacyCoverage, charset: &Charset) -> bool {
     let family = item
         .check
@@ -274,6 +293,7 @@ fn read_cmap(data: &[u8]) -> Vec<u32> {
     font_file::load_cmap(data).map_or_else(|_| Vec::new(), |cmap| cmap.into_keys().collect())
 }
 
+#[must_use]
 pub fn to_candidate(item: &LegacyCoverage, path: &str) -> Option<Candidate> {
     let check = item.check.as_ref()?;
     if path.is_empty() {
@@ -288,6 +308,7 @@ pub fn to_candidate(item: &LegacyCoverage, path: &str) -> Option<Candidate> {
     })
 }
 
+#[must_use]
 pub fn pick_candidate<'a>(
     font: &str,
     family: &str,
@@ -297,34 +318,37 @@ pub fn pick_candidate<'a>(
         .into_iter()
         .filter(|name| !name.is_empty())
         .collect();
-    candidates
-        .iter()
-        .find(|c| wanted.contains(&normalize(&c.name)) || wanted.contains(&normalize(&c.family)))
+    candidates.iter().find(|candidate| {
+        wanted.contains(&normalize(&candidate.name))
+            || wanted.contains(&normalize(&candidate.family))
+    })
 }
 
-pub fn describe_source(candidate: Option<&Candidate>) -> (String, String) {
+#[must_use]
+pub fn describe_source(candidate: Option<&Candidate>) -> Suggestion {
     let Some(candidate) = candidate else {
-        return (
-            String::new(),
-            "no matching font in the game: choose a TTF/OTF with your letters".to_string(),
-        );
+        return Suggestion {
+            source: String::new(),
+            note: "no matching font in the game: choose a TTF/OTF with your letters".to_string(),
+        };
     };
     if candidate.missing.is_empty() {
-        return (
-            candidate.path.clone(),
-            format!("game font {} has all your letters", candidate.name),
-        );
+        return Suggestion {
+            source: candidate.path.clone(),
+            note: format!("game font {} has all your letters", candidate.name),
+        };
     }
-    (
-        String::new(),
-        format!(
+    Suggestion {
+        source: String::new(),
+        note: format!(
             "game font {} lacks {}: add them in a font editor and choose the edited file, or choose another font",
             candidate.path,
             shorten(&candidate.missing)
         ),
-    )
+    }
 }
 
+#[must_use]
 pub fn shorten(chars: &str) -> String {
     let count = chars.chars().count();
     if count <= 12 {
@@ -334,6 +358,7 @@ pub fn shorten(chars: &str) -> String {
     format!("{count} letters ({head}…)")
 }
 
+#[must_use]
 pub fn skip_reason(item: &TmpCoverage, raw_note: &str, shared: &HashSet<Ref>) -> Option<String> {
     let font = &item.font;
     if font.point_size.is_none() {
@@ -349,7 +374,7 @@ pub fn skip_reason(item: &TmpCoverage, raw_note: &str, shared: &HashSet<Ref>) ->
     let Some(atlas) = atlas else {
         return Some("its atlas texture is missing, ufk cannot rebake it".to_string());
     };
-    if atlas.0 != font.reference.0 {
+    if atlas.serialized_file != font.reference.serialized_file {
         return Some("its atlas is in another game file, ufk cannot rebake it".to_string());
     }
     if shared.contains(atlas) {
@@ -359,6 +384,7 @@ pub fn skip_reason(item: &TmpCoverage, raw_note: &str, shared: &HashSet<Ref>) ->
 }
 
 /// Fonts in other game files can point at the same atlas, so references are compared across files.
+#[must_use]
 pub fn find_shared_atlases(tmp: &[TmpCoverage]) -> HashSet<Ref> {
     let mut used: HashMap<&Ref, usize> = HashMap::new();
     for atlas in tmp
@@ -382,9 +408,9 @@ fn to_need(item: Lacking, charset: &Charset, resets: &[Place]) -> Need {
             letters: item.missing_letters.clone(),
             marks: item.missing_typography.clone(),
             file: item.font.file.clone(),
-            path_id: item.font.reference.1,
+            path_id: item.font.reference.path_id,
             other_script: is_tmp_other_script(item, charset),
-            cab: item.font.reference.0.clone(),
+            cab: item.font.reference.serialized_file.clone(),
             resets: Vec::new(),
             texts: item.texts,
         },
@@ -393,15 +419,17 @@ fn to_need(item: Lacking, charset: &Charset, resets: &[Place]) -> Need {
             Need {
                 kind: Kind::Legacy,
                 name: item.font.name.clone(),
-                family: check.map_or_else(String::new, |c| {
-                    format!("{} {}", c.family, c.style).trim().to_string()
+                family: check.map_or_else(String::new, |check| {
+                    format!("{} {}", check.family, check.style)
+                        .trim()
+                        .to_string()
                 }),
                 letters: check.map_or_else(String::new, read_unusable),
-                marks: check.map_or_else(String::new, |c| c.missing_typography.clone()),
+                marks: check.map_or_else(String::new, |check| check.missing_typography.clone()),
                 file: item.font.file.clone(),
-                path_id: item.font.reference.1,
+                path_id: item.font.reference.path_id,
                 other_script: is_legacy_other_script(item, charset),
-                cab: item.font.reference.0.clone(),
+                cab: item.font.reference.serialized_file.clone(),
                 resets: resets.to_vec(),
                 texts: item.texts,
             }
@@ -409,6 +437,7 @@ fn to_need(item: Lacking, charset: &Charset, resets: &[Place]) -> Need {
     }
 }
 
+#[must_use]
 pub fn group_entries(
     fixable: &[Lacking],
     candidates: &[Candidate],
@@ -416,14 +445,16 @@ pub fn group_entries(
     charset: &Charset,
     resets: &HashMap<Ref, Vec<Place>>,
 ) -> Vec<Entry> {
-    let mut groups: IndexMap<(Kind, String, String), Vec<Need>> = IndexMap::new();
+    let mut groups: IndexMap<FontKey, Vec<Need>> = IndexMap::new();
     for item in fixable {
         let places = resets.get(item.reference()).map_or(&[][..], Vec::as_slice);
         let need = to_need(*item, charset, places);
-        groups
-            .entry((need.kind, need.name.clone(), need.family.clone()))
-            .or_default()
-            .push(need);
+        let key = FontKey {
+            kind: need.kind,
+            font: need.name.clone(),
+            family: need.family.clone(),
+        };
+        groups.entry(key).or_default().push(need);
     }
     let mut entries: Vec<Entry> = groups
         .values()
@@ -437,7 +468,8 @@ fn build_entry(needs: &[Need], candidates: &[Candidate], data_dir: &Path) -> Ent
     let first = needs
         .iter()
         .find(|need| !need.letters.is_empty())
-        .unwrap_or(&needs[0]);
+        .or_else(|| needs.first())
+        .expect("every group holds at least one need");
     let marks_only = first.letters.is_empty();
     let complete = needs
         .iter()
@@ -459,16 +491,16 @@ fn build_entry(needs: &[Need], candidates: &[Candidate], data_dir: &Path) -> Ent
         .collect();
     let lacking_marks: String = marks
         .chars()
-        .filter(|ch| picked.is_some_and(|c| c.marks.contains(*ch)))
+        .filter(|ch| picked.is_some_and(|candidate| candidate.marks.contains(*ch)))
         .collect();
-    let candidate = picked.map(|c| match marks_only && !lacking_marks.is_empty() {
+    let candidate = picked.map(|picked| match marks_only && !lacking_marks.is_empty() {
         true => Candidate {
-            missing: c.missing.clone() + &lacking_marks,
-            ..c.clone()
+            missing: picked.missing.clone() + &lacking_marks,
+            ..picked.clone()
         },
-        false => c.clone(),
+        false => picked.clone(),
     });
-    let (source, note) = describe_source(candidate.as_ref());
+    let Suggestion { source, note } = describe_source(candidate.as_ref());
     let skip_note = match (first.other_script, complete, marks_only) {
         (true, _, _) => Some(OTHER_SCRIPT_NOTE),
         (false, true, _) => Some(COMPLETE_NOTE),
@@ -509,6 +541,7 @@ fn build_entry(needs: &[Need], candidates: &[Candidate], data_dir: &Path) -> Ent
 }
 
 /// Blank letters and letters drawn with another letter's shape need a new font as much as missing ones.
+#[must_use]
 pub fn read_unusable(check: &FontCheck) -> String {
     format!("{}{}{}", check.missing_letters, check.empty, check.aliased)
         .chars()
@@ -517,6 +550,7 @@ pub fn read_unusable(check: &FontCheck) -> String {
         .collect()
 }
 
+#[must_use]
 pub fn legacy_skip_reason(item: &LegacyCoverage) -> Option<String> {
     if item.font.data.is_empty() {
         return Some(
@@ -535,9 +569,9 @@ pub fn legacy_skip_reason(item: &LegacyCoverage) -> Option<String> {
     None
 }
 
-fn group_skipped(rows: Vec<(String, String, String)>) -> Vec<Skipped> {
+fn group_skipped(rows: Vec<SkippedRow>) -> Vec<Skipped> {
     let mut groups: IndexMap<(String, String), Vec<Value>> = IndexMap::new();
-    for (font, reason, file) in rows {
+    for SkippedRow { font, reason, file } in rows {
         groups
             .entry((font, reason))
             .or_default()
@@ -553,6 +587,7 @@ fn group_skipped(rows: Vec<(String, String, String)>) -> Vec<Skipped> {
         .collect()
 }
 
+#[must_use]
 pub fn find_drawn_from_font(
     tmp: &[TmpCoverage],
     legacy: &[LegacyCoverage],
@@ -573,8 +608,8 @@ pub fn find_drawn_from_font(
         }
         drawn.entry(source.clone()).or_default().push(Place {
             file: folder::format_relative(&item.font.file, data_dir),
-            path_id: item.font.reference.1,
-            cab: item.font.reference.0.clone(),
+            path_id: item.font.reference.path_id,
+            cab: item.font.reference.serialized_file.clone(),
         });
     }
     drawn
@@ -604,8 +639,8 @@ fn add_drawn_texts(
         .map(|item| {
             let extra: usize = drawing
                 .iter()
-                .filter(|t| t.font.source_font.as_ref() == Some(&item.font.reference))
-                .map(|t| t.texts)
+                .filter(|tmp| tmp.font.source_font.as_ref() == Some(&item.font.reference))
+                .map(|tmp| tmp.texts)
                 .sum();
             LegacyCoverage {
                 texts: item.texts + extra,
@@ -641,7 +676,8 @@ pub struct Scanned<'a> {
     pub legacy: Vec<LegacyCoverage>,
 }
 
-pub fn make_plan(scanned: Scanned, charset: &Charset, charset_spec: (&str, Option<&str>)) -> Plan {
+#[must_use]
+pub fn make_plan(scanned: Scanned, charset: &Charset, language: &str, chars: Option<&str>) -> Plan {
     let Scanned {
         game_path,
         data_dir,
@@ -674,7 +710,11 @@ pub fn make_plan(scanned: Scanned, charset: &Charset, charset_spec: (&str, Optio
     let unfixable_tmp = lacking.iter().filter_map(|item| {
         let reason = skip_reason(item, raw_note, &shared)?;
         let other = is_tmp_other_script(item, charset);
-        (!other).then(|| (item.font.name.clone(), reason, relative(&item.font.file)))
+        (!other).then(|| SkippedRow {
+            font: item.font.name.clone(),
+            reason,
+            file: relative(&item.font.file),
+        })
     });
     let lacking_legacy: Vec<&LegacyCoverage> = legacy
         .iter()
@@ -687,11 +727,14 @@ pub fn make_plan(scanned: Scanned, charset: &Charset, charset_spec: (&str, Optio
     let unfixable_legacy = lacking_legacy.iter().filter_map(|item| {
         let reason = legacy_skip_reason(item)?;
         let other = item.check.is_some() && is_legacy_other_script(item, charset);
-        (!other).then(|| (item.font.name.clone(), reason, relative(&item.font.file)))
+        (!other).then(|| SkippedRow {
+            font: item.font.name.clone(),
+            reason,
+            file: relative(&item.font.file),
+        })
     });
     let fixable: Vec<Lacking> = fixable.chain(fixable_legacy).collect();
-    let unfixable: Vec<_> = unfixable_tmp.chain(unfixable_legacy).collect();
-    let (language, chars) = charset_spec;
+    let unfixable: Vec<SkippedRow> = unfixable_tmp.chain(unfixable_legacy).collect();
     Plan {
         game: game_path.display().to_string(),
         language: language.to_string(),
@@ -709,6 +752,7 @@ pub struct FontKey {
 }
 
 impl FontKey {
+    #[must_use]
     pub fn of(entry: &Entry) -> FontKey {
         FontKey {
             kind: entry.kind,
@@ -718,24 +762,22 @@ impl FontKey {
     }
 }
 
-pub fn entry_key(entry: &Entry) -> (Kind, &str, &str) {
-    (entry.kind, &entry.font, &entry.family)
-}
-
+#[must_use]
 pub fn keep_user_choices(new: Plan, old: &Plan) -> Plan {
-    let by_key: HashMap<_, &Entry> = old
+    let by_key: HashMap<FontKey, &Entry> = old
         .fonts
         .iter()
-        .map(|entry| (entry_key(entry), entry))
+        .map(|entry| (FontKey::of(entry), entry))
         .collect();
     let fonts = new
         .fonts
         .iter()
-        .map(|entry| merge_choice(entry, by_key.get(&entry_key(entry)).copied()))
+        .map(|entry| merge_choice(entry, by_key.get(&FontKey::of(entry)).copied()))
         .collect();
     Plan { fonts, ..new }
 }
 
+#[must_use]
 pub fn merge_choice(entry: &Entry, previous: Option<&Entry>) -> Entry {
     let Some(previous) = previous else {
         return entry.clone();
@@ -795,14 +837,14 @@ mod tests {
     fn tmp_font(name: &str, family: &str, file: &str, path_id: i64) -> TmpCoverage {
         let font = TmpFont {
             file: Path::new(DATA).join(file),
-            reference: ("CAB-1".to_string(), path_id),
+            reference: ("CAB-1".to_string(), path_id).into(),
             name: name.to_string(),
             codepoints: "ABC".chars().map(u32::from).collect::<BTreeSet<u32>>(),
             fallbacks: Vec::new(),
             family: Some(family.to_string()),
             point_size: Some(30.into()),
             padding: Some(3),
-            atlas: Some((512, 512)),
+            atlas: Some((512, 512).into()),
             render_mode: None,
             dynamic: Some(false),
             atlases: None,
@@ -844,7 +886,7 @@ mod tests {
     fn legacy_font(file: &str, path_id: i64) -> LegacyFont {
         LegacyFont {
             file: Path::new(DATA).join(file),
-            reference: ("CAB-1".to_string(), path_id),
+            reference: ("CAB-1".to_string(), path_id).into(),
             name: "Body".to_string(),
             data: b"x".to_vec(),
             os_names: Vec::new(),
@@ -910,7 +952,7 @@ mod tests {
             tmp,
             legacy,
         };
-        make_plan(scanned, &uk(), ("uk", None))
+        make_plan(scanned, &uk(), "uk", None)
     }
 
     #[test]
@@ -981,7 +1023,7 @@ mod tests {
             texts: 0,
         };
         let found = to_candidate(&item, "fonts/Body.ttf");
-        assert_eq!(describe_source(found.as_ref()).0, "");
+        assert_eq!(describe_source(found.as_ref()).source, "");
     }
 
     #[test]
@@ -1047,11 +1089,11 @@ mod tests {
                 "sharedassets0.assets",
                 path_id,
             );
-            item.font.reference = (cab.to_string(), path_id);
+            item.font.reference = (cab.to_string(), path_id).into();
             item.font.atlases = Some(
                 atlases
                     .into_iter()
-                    .map(|a| a.map(|(c, id)| (c.to_string(), id)))
+                    .map(|a| a.map(|(c, id)| (c.to_string(), id).into()))
                     .collect(),
             );
             item
@@ -1184,8 +1226,8 @@ mod tests {
     fn dynamic_font(source: Option<i64>) -> TmpCoverage {
         let mut item = tmp_font("Body SDF", "Body", "resources.assets", 5);
         item.font.dynamic = Some(true);
-        item.font.source_font = source.map(|id| ("CAB-1".to_string(), id));
-        item.font.atlases = Some(vec![Some(("CAB-1".to_string(), 50))]);
+        item.font.source_font = source.map(|id| ("CAB-1".to_string(), id).into());
+        item.font.atlases = Some(vec![Some(("CAB-1".to_string(), 50).into())]);
         item
     }
 
