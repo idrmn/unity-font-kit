@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::disk;
 use crate::progress::{self, Report};
 use rabex::files::bundlefile::{BundleFileReader, ExtractionConfig};
 use unicode_general_category::{GeneralCategory, get_general_category};
@@ -141,7 +142,7 @@ pub fn list_asset_files(game: &Game, depth: ScanDepth, report: Report) -> Result
     walk(&game.data_dir, &mut nested)?;
     sort_paths(&mut nested);
     nested.retain(|path| is_bundle_candidate(path, &game.data_dir, depth));
-    for path in progress::track(&nested, LISTING, |path| file_name(path), report) {
+    for path in progress::track(&nested, LISTING, |path| disk::file_name(path), report) {
         if is_unity_file(path)? {
             files.push(path.clone());
         }
@@ -159,7 +160,7 @@ fn is_named_like_font(path: &Path, data_dir: &Path) -> bool {
 }
 
 fn is_top_level(path: &Path, depth: ScanDepth) -> Result<bool> {
-    let name = file_name(path);
+    let name = disk::file_name(path);
     if is_top_level_name(&name) {
         return Ok(true);
     }
@@ -180,7 +181,7 @@ fn is_bundle_candidate(path: &Path, data_dir: &Path, depth: ScanDepth) -> bool {
         return false;
     }
     depth == ScanDepth::Deep
-        || is_top_level_name(&file_name(path))
+        || is_top_level_name(&disk::file_name(path))
         || is_named_like_font(path, data_dir)
 }
 
@@ -206,7 +207,7 @@ fn is_numbered(name: &str, prefix: &str, suffix: &str) -> bool {
 }
 
 fn is_skipped(path: &Path) -> bool {
-    SKIP_SUFFIXES.contains(&file_suffix(&file_name(path)).to_lowercase().as_str())
+    SKIP_SUFFIXES.contains(&file_suffix(&disk::file_name(path)).to_lowercase().as_str())
 }
 
 fn file_suffix(name: &str) -> &str {
@@ -367,11 +368,6 @@ pub fn format_relative(path: &Path, root: &Path) -> String {
             .join("/"),
         Err(_) => path.display().to_string(),
     }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 fn list_sorted(dir: &Path) -> Result<Vec<PathBuf>> {

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
 
+use crate::disk;
 use crate::downloads;
 use crate::game::addressables;
 
@@ -27,7 +28,7 @@ pub struct Project {
 pub type Hashes = Map<String, Value>;
 
 pub fn open_project(plan: &Path) -> Result<Project> {
-    let name = file_name(plan);
+    let name = disk::file_name(plan);
     let Some(stem) = name.strip_suffix(SUFFIX) else {
         bail!("{name} is not a ufk plan, its name must end with {SUFFIX}");
     };
@@ -234,7 +235,7 @@ fn copy_durably(source: &Path, target: &Path) -> io::Result<()> {
 }
 
 fn partial_path(path: &Path) -> PathBuf {
-    path.with_file_name(format!("{}{PARTIAL}", file_name(path)))
+    path.with_file_name(format!("{}{PARTIAL}", disk::file_name(path)))
 }
 
 pub fn write_installed(project: &Project, installed: &Hashes) -> Result<()> {
@@ -300,20 +301,11 @@ pub fn restore(project: &Project, data_dir: &Path) -> Result<Vec<String>> {
     for file in &files {
         copy_atomically(&project.backup.join(file), &data_dir.join(file))?;
     }
-    remove_if_present(&project.installed)?;
+    disk::remove_file(&project.installed)?;
     // The game holds the originals again; an old backup would block later changes by other tools.
     std::fs::remove_dir_all(&project.backup)
         .with_context(|| format!("Cannot delete {}", project.backup.display()))?;
     Ok(files)
-}
-
-fn remove_if_present(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", path.display()))
-        }
-        _ => Ok(()),
-    }
 }
 
 /// Text files get the system's line ends; the old file stays whole until the new one is on disk.
@@ -343,11 +335,6 @@ fn catalogs_first(files: Vec<String>) -> Vec<String> {
 
 pub fn format_hashes(hashes: &Hashes) -> Result<String> {
     Ok(serde_json::to_string_pretty(hashes)?)
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

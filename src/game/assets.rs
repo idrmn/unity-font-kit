@@ -22,6 +22,7 @@ use rabex::typetree::typetree_cache::sync::TypeTreeCache;
 use rabex::typetree::{NullTypeTreeProvider, TypeTreeNode, TypeTreeProvider};
 use serde_json::Value;
 
+use crate::disk;
 use crate::game::folder::{self, NOT_SERIALIZED};
 use crate::game::scan::Ref;
 
@@ -87,7 +88,7 @@ pub fn open(path: &Path, home: Option<&Path>) -> Result<Source> {
         false => {
             let bytes =
                 std::fs::read(path).with_context(|| format!("Cannot read {}", path.display()))?;
-            read_entries(bytes, &file_name(path))?
+            read_entries(bytes, &disk::file_name(path))?
         }
     };
     let units = entries
@@ -436,7 +437,7 @@ impl Source {
                 .parent()
                 .map(|dir| dir.to_string_lossy())
                 .unwrap_or_default();
-            format!("{parent}/{}", file_name(path).to_lowercase()).ends_with(clean)
+            format!("{parent}/{}", disk::file_name(path).to_lowercase()).ends_with(clean)
         };
         files
             .iter()
@@ -494,7 +495,7 @@ pub fn save(path: &Path, changed: &Changed, target: &Path) -> Result<()> {
     } else if rawbundle::is_raw_bundle(&bytes) {
         out.write_all(&save_raw_bundle(&bytes, changed)?)?;
     } else {
-        write_serialized(&bytes, &file_name(path), None, changed, &mut out)?;
+        write_serialized(&bytes, &disk::file_name(path), None, changed, &mut out)?;
     }
     out.flush()
         .with_context(|| format!("Cannot write {}", target.display()))
@@ -598,7 +599,7 @@ fn find_case_insensitive(dir: &Path, name: &str) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|entry| entry.path())
-        .find(|path| path.is_file() && file_name(path).to_lowercase() == name.to_lowercase())
+        .find(|path| path.is_file() && disk::file_name(path).to_lowercase() == name.to_lowercase())
 }
 
 #[must_use]
@@ -610,7 +611,15 @@ fn base_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_string()
 }
 
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
+/// Python truthiness: empty and zero count as false.
+#[must_use]
+pub fn is_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(text) => !text.is_empty(),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+    }
 }

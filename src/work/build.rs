@@ -6,6 +6,7 @@ use indexmap::IndexMap;
 use sha1::Sha1;
 use unicode_general_category::{GeneralCategory, get_general_category};
 
+use crate::disk;
 use crate::fonts::charsets::{self, Charset};
 use crate::fonts::extract;
 use crate::fonts::font_file::{self, FontCheck};
@@ -180,7 +181,7 @@ pub fn check_sources(
             .with_context(|| format!("Cannot read {}", path.display()))
             .and_then(|data| font_file::check(&data, charset))
             .with_context(|| entry.font.clone())?;
-        lines.extend(describe_flaws(&file_name(&path), &checked, charset));
+        lines.extend(describe_flaws(&disk::file_name(&path), &checked, charset));
         seen.push(path);
     }
     Ok(lines)
@@ -670,11 +671,6 @@ fn collect_not_baked(targets: &[(&Entry, &Place)], bakes: &[Bake]) -> IndexMap<S
         }
     }
     not_baked
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

@@ -9,6 +9,8 @@ use sha2::Sha256;
 use tempfile::NamedTempFile;
 use ureq::Agent;
 
+use crate::disk;
+
 const HOME: &str = "ufk";
 
 /// A per-user folder, so another copy of the program still finds the backups of patched games.
@@ -48,7 +50,7 @@ pub fn fetch(url: &str, sha256: &str, target: &Path, purpose: &str) -> Result<Pa
     if is_intact(target, sha256) {
         return Ok(target.to_path_buf());
     }
-    let name = file_name(target);
+    let name = disk::file_name(target);
     let dir = target.parent().context("No folder to download into")?;
     std::fs::create_dir_all(dir).with_context(|| format!("Cannot create {}", dir.display()))?;
     let mut partial = tempfile::Builder::new()
@@ -125,9 +127,4 @@ fn make_executable(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<()> {
     Ok(())
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }

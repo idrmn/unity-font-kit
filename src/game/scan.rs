@@ -11,6 +11,7 @@ use rabex::typetree::TypeTreeNode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value};
 
+use crate::disk;
 use crate::game::assets::{self, Fit, Script, Source, Tpk, Unit};
 use crate::game::raw_tmp;
 use crate::game::tmp_schema::{self, Tree};
@@ -200,7 +201,7 @@ pub fn scan_files(
     report: Report,
 ) -> ScanResult {
     let reader = Reader::new(generator, raw_note);
-    let parts = progress::track(files, "Reading", |path| file_name(path), report)
+    let parts = progress::track(files, "Reading", |path| disk::file_name(path), report)
         .map(|path| scan_file_safely(path, &reader, homes.get(path).map(PathBuf::as_path)));
     merge_results(parts)
 }
@@ -225,14 +226,17 @@ fn scan_file_safely(path: &Path, reader: &Reader, home: Option<&Path>) -> ScanRe
         scan_file(path, reader, home)
     }));
     read.unwrap_or_else(|_| ScanResult {
-        errors: vec![format!("{}: ufk could not read this file", file_name(path))],
+        errors: vec![format!(
+            "{}: ufk could not read this file",
+            disk::file_name(path)
+        )],
         ..ScanResult::default()
     })
 }
 
 /// One unreadable file must not stop the scan, nor one unreadable object hide the rest of its file.
 fn scan_file(path: &Path, reader: &Reader, home: Option<&Path>) -> ScanResult {
-    let name = file_name(path);
+    let name = disk::file_name(path);
     let source = match assets::open(path, home) {
         Ok(source) => source,
         Err(error) => {
@@ -296,7 +300,7 @@ fn read_object(
         let Some(tree) = tree else {
             let note = format!(
                 "{}: TMP Settings unreadable, {}",
-                file_name(path),
+                disk::file_name(path),
                 reader.raw_note
             );
             return Ok(Some(Found::Error(note)));
@@ -386,7 +390,7 @@ fn read_text_use(
     for field in text_field.field_path {
         pptr = pptr
             .get(*field)
-            .filter(|value| is_truthy(value))
+            .filter(|value| assets::is_truthy(value))
             .unwrap_or(&empty);
     }
     let Some(font) = resolve_pptr(&Pointers::of(unit), pptr) else {
@@ -550,7 +554,7 @@ fn read_legacy_font(
 fn read_settings(path: &Path, pointers: &Pointers, tree: &Tree) -> TmpSettings {
     let default = tree
         .get("m_defaultFontAsset")
-        .filter(|value| is_truthy(value));
+        .filter(|value| assets::is_truthy(value));
     TmpSettings {
         file: path.to_path_buf(),
         default_font: default.and_then(|pptr| resolve_pptr(pointers, pptr)),
@@ -574,7 +578,7 @@ fn read_new_schema(path: &Path, pointers: &Pointers, path_id: i64, tree: &Tree) 
     let empty = Value::Object(Tree::new());
     let face = tree
         .get("m_FaceInfo")
-        .filter(|value| is_truthy(value))
+        .filter(|value| assets::is_truthy(value))
         .unwrap_or(&empty);
     let family: Vec<&str> = ["m_FamilyName", "m_StyleName"]
         .iter()
@@ -604,7 +608,7 @@ fn read_new_schema(path: &Path, pointers: &Pointers, path_id: i64, tree: &Tree) 
         .collect::<Result<_>>()?;
     let source_font = tree
         .get("m_SourceFontFile")
-        .filter(|value| is_truthy(value));
+        .filter(|value| assets::is_truthy(value));
     Ok(TmpFont {
         file: path.to_path_buf(),
         reference: Ref {
@@ -632,7 +636,7 @@ fn read_old_schema(path: &Path, pointers: &Pointers, path_id: i64, tree: &Tree) 
     let empty = Value::Object(Tree::new());
     let info = tree
         .get("m_fontInfo")
-        .filter(|value| is_truthy(value))
+        .filter(|value| assets::is_truthy(value))
         .unwrap_or(&empty);
     let whole = |key: &str| {
         info.get(key)
@@ -762,22 +766,6 @@ fn tree_text(tree: &Tree, key: &str) -> Result<String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .with_context(|| format!("no {key}"))
-}
-
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(number) => number.as_f64().is_some_and(|value| value != 0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

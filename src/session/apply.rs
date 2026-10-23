@@ -1,9 +1,9 @@
-use std::io::ErrorKind;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
+use crate::disk;
 use crate::downloads;
 use crate::fonts::charsets;
 use crate::game::folder::{self, Game};
@@ -157,12 +157,7 @@ pub fn remove_game_data(record: &GameRecord) -> Result<()> {
         Err(_) => {}
     }
     let folder = state::project_folder(&home, record);
-    match std::fs::remove_dir_all(&folder) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", folder.display()))
-        }
-        _ => Ok(()),
-    }
+    disk::remove_dir(&folder)
 }
 
 /// The changed files become the originals, so their old backups are deleted.
@@ -171,19 +166,19 @@ pub fn accept_update(view: &GameView) -> Result<GameView> {
     let work = state::open_work(&view.home, &view.record)?;
     let updated = state::find_updated_files(&work, &game.data_dir)?;
     for file in &updated {
-        remove_file(&work.backup.join(file))?;
+        disk::remove_file(&work.backup.join(file))?;
     }
     let installed: Hashes = project::read_installed(&work)?
         .into_iter()
         .filter(|(file, _)| !updated.contains(file))
         .collect();
     match installed.is_empty() {
-        true => remove_file(&work.installed)?,
+        true => disk::remove_file(&work.installed)?,
         false => project::write_installed(&work, &installed)?,
     }
     // The last build read the old originals; the next apply builds again from the new ones.
-    remove_dir(&work.patched)?;
-    remove_file(&work.built)?;
+    disk::remove_dir(&work.patched)?;
+    disk::remove_file(&work.built)?;
     super::forget_scan(&work)?;
     let saved = state::load_saved(&work)?;
     state::store_saved(
@@ -286,7 +281,7 @@ fn collect_results(
         .filter(|entry| !entry.skip && !entry.source.is_empty())
         .map(|entry| {
             let source = build::resolve_source(entry, &work.plan)
-                .map(|path| file_name(&path))
+                .map(|path| disk::file_name(&path))
                 .unwrap_or_default();
             let notes = built
                 .injected
@@ -391,29 +386,6 @@ fn blame(plan: &Plan, wanted: &Wanted, error: &str) -> Vec<FontResult> {
             }
         })
         .collect()
-}
-
-fn remove_file(path: &Path) -> Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", path.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn remove_dir(path: &Path) -> Result<()> {
-    match std::fs::remove_dir_all(path) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", path.display()))
-        }
-        _ => Ok(()),
-    }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

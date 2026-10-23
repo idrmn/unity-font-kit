@@ -1,3 +1,4 @@
+pub(crate) mod disk;
 pub(crate) mod downloads;
 pub(crate) mod fonts;
 pub(crate) mod freetype;

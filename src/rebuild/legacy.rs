@@ -1,5 +1,5 @@
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::json;
 use skrifa::raw::TableProvider;
 
 use crate::fonts::font_file;
@@ -16,7 +16,7 @@ pub struct LineMetrics {
 pub fn swap_font_data(tree: &Tree, data: &[u8]) -> Result<Tree> {
     let legacy_bounds = tree
         .get("m_UseLegacyBoundsCalculation")
-        .is_some_and(is_truthy);
+        .is_some_and(assets::is_truthy);
     let size = tree.get("m_FontSize").map_or(0.0, tmp_schema::number);
     let metrics = read_line_metrics(data, size, legacy_bounds)?;
     let mut swapped = tree.clone();
@@ -76,17 +76,6 @@ pub fn read_line_metrics(data: &[u8], size: f64, legacy_bounds: bool) -> Result<
         descent: f64::from(descent) * scale,
         line_spacing: f64::from(gap) * scale,
     })
-}
-
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Bool(flag) => *flag,
-        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
-        Value::Null => false,
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
 }
 
 #[cfg(test)]

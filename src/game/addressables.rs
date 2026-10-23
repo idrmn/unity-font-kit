@@ -4,6 +4,8 @@ use anyhow::{Result, bail};
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 
+use crate::game::assets;
+
 pub const JSON_CATALOG: &str = "StreamingAssets/aa/catalog.json";
 pub const BINARY_CATALOG: &str = "StreamingAssets/aa/catalog.bin";
 pub const SETTINGS: &str = "StreamingAssets/aa/settings.json";
@@ -53,7 +55,7 @@ pub fn list_catalogs(settings: &str) -> Result<Catalogs> {
 fn read_catalog_ids(locations: Option<&Value>) -> Result<Vec<String>> {
     let locations = match locations {
         None => return Ok(Vec::new()),
-        Some(value) if is_falsy(value) => return Ok(Vec::new()),
+        Some(value) if !assets::is_truthy(value) => return Ok(Vec::new()),
         Some(Value::Array(locations)) => locations,
         Some(_) => bail!("{SETTINGS}: m_CatalogLocations is not a list"),
     };
@@ -68,17 +70,6 @@ fn read_catalog_ids(locations: Option<&Value>) -> Result<Vec<String>> {
         ids.push(read_text(fields.get("m_InternalId"))?.to_owned());
     }
     Ok(ids)
-}
-
-fn is_falsy(value: &Value) -> bool {
-    match value {
-        Value::Null => true,
-        Value::Bool(flag) => !flag,
-        Value::Number(number) => number.as_f64() == Some(0.0),
-        Value::String(text) => text.is_empty(),
-        Value::Array(items) => items.is_empty(),
-        Value::Object(fields) => fields.is_empty(),
-    }
 }
 
 fn read_text(value: Option<&Value>) -> Result<&str> {

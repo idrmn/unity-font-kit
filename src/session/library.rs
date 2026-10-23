@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use crate::disk;
 use crate::downloads;
 use crate::game::folder::{self, Backend, Game};
 
@@ -155,11 +156,11 @@ pub(crate) fn make_record(game: &Game) -> GameRecord {
 
 /// The data folder is named after the executable; the game folder's name reads as people write it.
 fn name_game(data_dir: &Path, folder: &Path) -> String {
-    let named = file_name(folder);
+    let named = disk::file_name(folder);
     if !named.is_empty() {
         return named;
     }
-    let data = file_name(data_dir);
+    let data = disk::file_name(data_dir);
     data.strip_suffix(DATA_SUFFIX).unwrap_or(&data).to_string()
 }
 
@@ -182,11 +183,6 @@ pub(crate) fn make_id(name: &str, folder: &Path) -> String {
         true => format!("game-{hash}"),
         false => format!("{slug}-{hash}"),
     }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]

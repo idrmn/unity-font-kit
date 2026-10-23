@@ -1,10 +1,10 @@
 use std::collections::{BTreeSet, HashMap};
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::disk;
 use crate::downloads;
 use crate::fonts::charsets::Charset;
 use crate::fonts::{coverage, extract};
@@ -118,13 +118,7 @@ pub(crate) fn has_scan_cache(work: &Project) -> bool {
 }
 
 pub(crate) fn forget_scan(work: &Project) -> Result<()> {
-    let path = work.work.join(SCAN_FILE);
-    match std::fs::remove_file(&path) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            Err(error).with_context(|| format!("Cannot delete {}", path.display()))
-        }
-        _ => Ok(()),
-    }
+    disk::remove_file(&work.work.join(SCAN_FILE))
 }
 
 /// A fast scan also reads the files where the plan already has fonts, so fonts a deep scan found stay.

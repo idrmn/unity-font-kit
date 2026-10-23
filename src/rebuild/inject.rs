@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use super::recipe::{self, Recipe};
 use super::render::{self, Gray};
 use super::{bake, legacy};
+use crate::disk;
 use crate::game::assets::{self, Changed, Fit, Source, Tpk, Unit};
 use crate::game::folder;
 use crate::game::scan::{
@@ -152,8 +153,8 @@ pub fn load_bake(recipe_path: &Path) -> Result<Bake> {
     let built = recipe::load(recipe_path)?;
     let baked = recipe::load_baked(recipe_path)?;
     let atlas_png = recipe::artifact_paths(recipe_path)?.png;
-    if !baked.get("glyphs").is_some_and(is_truthy)
-        || !baked.get("characters").is_some_and(is_truthy)
+    if !baked.get("glyphs").is_some_and(assets::is_truthy)
+        || !baked.get("characters").is_some_and(assets::is_truthy)
     {
         bail!("{}: the bake has no glyphs", built.font);
     }
@@ -169,7 +170,7 @@ pub fn load_bake(recipe_path: &Path) -> Result<Bake> {
     if (atlas.width, atlas.height) != size {
         bail!(
             "{} is ({}, {}), the bake says ({}, {})",
-            file_name(&atlas_png),
+            disk::file_name(&atlas_png),
             atlas.width,
             atlas.height,
             size.0,
@@ -351,7 +352,7 @@ fn reset_dynamic(
     Ok(Cleared {
         file: job.file.clone(),
         font: job.font.clone(),
-        source: file_name(&job.source),
+        source: disk::file_name(&job.source),
     })
 }
 
@@ -509,7 +510,7 @@ fn swap_tree(tree: &Tree, swap: &Swap) -> Result<(Tree, Swapped)> {
     let done = Swapped {
         file: swap.file.clone(),
         font: swap.font.clone(),
-        source: file_name(&swap.source),
+        source: disk::file_name(&swap.source),
         lost,
     };
     Ok((swapped, done))
@@ -815,7 +816,7 @@ fn rebuild_new_tree(tree: &Tree, baked: &Tree) -> Result<Tree> {
         let empty = clear_lists(table);
         let baked_table = baked
             .get("font_feature_table")
-            .filter(|t| is_truthy(t))
+            .filter(|t| assets::is_truthy(t))
             .cloned()
             .unwrap_or_else(|| json!({}));
         rebuilt.insert(
@@ -1068,22 +1069,6 @@ fn to_sorted_text(codes: &HashSet<i64>) -> String {
 
 fn describe_value(value: Option<&Value>) -> String {
     value.map_or_else(|| "nothing".to_string(), Value::to_string)
-}
-
-fn is_truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(flag) => *flag,
-        Value::Number(n) => n.as_f64().is_some_and(|n| n != 0.0),
-        Value::String(text) => !text.is_empty(),
-        Value::Array(items) => !items.is_empty(),
-        Value::Object(map) => !map.is_empty(),
-    }
-}
-
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
